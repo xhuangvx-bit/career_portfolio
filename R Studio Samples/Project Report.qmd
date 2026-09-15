@@ -1,0 +1,309 @@
+---
+title: "Parking Accessibility In Seattle"
+subtitle: INFO 201 Project Report
+author: Vivienne Huang and Hansika Addanki
+date: today
+format: 
+  html:
+    theme: cosmo
+    embed-resources: true
+    toc: true
+---
+
+```{r}
+library(tidyverse)
+```
+
+## Introduction
+Parking accessibility is an important issue in cities because parking availability and pricing can affect how easily people are able to reach workplaces, businesses, schools, and public spaces. In Seattle, parking is closely connected to transportation planning, traffic congestion, and environmental concerns. According to the [U.S. Department of Transportation Climate Change Center](https://www.transportation.gov/sites/dot.gov/files/2025-01/Parking%20Reforms.pdf), parking reforms can reduce the amount of time drivers spend searching for parking, also known as cruising, which can reduce congestion and greenhouse gas emissions while also improving access through walking, biking, and public transit. The report also explains that parking systems designed around balancing supply and demand can improve parking efficiency and reduce unnecessary vehicle circulation.
+
+In this project, we ask: **How accessible is parking in Seattle based on parking supply, vehicle demand, parking duration, and parking costs?** This question is important because parking accessibility depends on more than simply whether parking spaces exist. Parking may still feel inaccessible if drivers spend a long time searching for available spaces or if parking costs become too expensive during longer visits. The parking reform report also explains that reducing cruising time and improving parking efficiency can support both environmental sustainability and transportation accessibility.
+
+This analysis is interesting because parking accessibility affects many groups of people, including commuters, workers, residents, and visitors. By analyzing Seattle parking supply data together with paid parking transaction data, we can better understand how parking availability relates to vehicle demand and how parking duration relates to parking costs. These relationships can help reveal whether some parking conditions may create barriers for drivers or contribute to congestion in busy areas of Seattle.
+
+## Analysis of Parking Supply Data
+
+### Questions
+
+Parking accessibility can affect transportation, congestion, and how easily people are able to move throughout Seattle. In this analysis, we use publicly available parking study data from Seattle to better understand relationships between parking supply and parking demand. In particular, we use the dataset to try to answer:
+
+-  Does the number of parking spaces in an area relate to the total number of vehicles observed there?
+-  Do certain Seattle study areas appear to experience higher parking demand than others?
+-  How do construction/event closures appear to affect parking availability and vehicle counts?
+
+### Annual Parking Supply Data
+
+For this analysis, we used the [Seattle Annual Parking Study Data from the Seattle Open Data portal](https://data.seattle.gov/Transportation/Annual-Parking-Study-Data/7jzm-ucez/about_data)
+
+We believe this dataset is real and appropriate to use because it was collected and published by the City of Seattle as part of official parking studies. The dataset contains recorded observations of parking conditions in Seattle and includes information such as parking supply, vehicle counts, study area, and observation time. Because the data comes directly from a public government data source rather than a simulated example dataset, it is appropriate for studying real parking patterns in Seattle.
+
+The population we care about is parking accessibility and parking demand across Seattle. More specifically, we are interested in how parking supply relates to the number of vehicles using those spaces in different parts of the city. This population includes public parking activity in Seattle neighborhoods and business areas.
+
+The sample consists of recorded parking observations collected during Seattle parking studies. One major issue with using this sample to understand the larger population is that the observations only capture parking conditions during specific study periods and locations rather than every parking experience across Seattle. Parking demand may change depending on time of day, season, events, weather, or neighborhood activity, so the sample may not fully represent all parking conditions throughout the city.
+
+The most important variables for our analysis are Parking_Spaces and Total_Vehicle_Count. Parking_Spaces measures the number of parking spaces available in a recorded observation area, while Total_Vehicle_Count measures the number of vehicles observed at that location. These measurements were collected as part of Seattle’s parking study observations and allow us to compare parking supply with observed vehicle demand.
+
+For a sample of our data, see below:
+
+```{r}
+Annual_Parking_Study_Data_20260428<- read.csv("Annual_Parking_Study_Data_20260428.csv")
+Annual_Parking_Study_Data_20260428 |> glimpse()
+```
+
+
+### Data Preparation
+
+Before analyzing the data, we focused on the variables most relevant to our research question. We selected Parking_Spaces and Total_Vehicle_Count because these variables directly connect to parking supply and parking demand.
+
+We also filtered the dataset to remove observations where parking spaces or vehicle counts were zero or missing. This preparation step is important because observations without meaningful parking or vehicle values would not help us understand the relationship between supply and demand.
+
+```{r}
+parking_supply_clean <- Annual_Parking_Study_Data_20260428 |>
+  filter(Parking_Spaces > 0) |>
+  filter(Total_Vehicle_Count > 0)
+
+parking_supply_clean |>
+  glimpse()
+```
+
+This preparation step helps make the later analysis more focused. Observations with zero parking spaces or zero vehicle counts would not help us understand the relationship between parking supply and vehicle demand because they do not represent active parking use in the same way. We used filter() because it allows us to keep only the rows that are useful for answering our parking accessibility question.
+
+We also created a smaller summary by study area. This allows us to compare different parts of Seattle without looking only at individual observations. We used the mean here because we wanted each recorded observation in a study area to contribute to the average parking conditions for that area.
+
+```{r}
+parking_supply_by_area <- parking_supply_clean |>
+  group_by(Study_Area) |>
+  summarize(
+    mean_parking_spaces = mean(Parking_Spaces),
+    mean_vehicle_count = mean(Total_Vehicle_Count)
+  )
+
+parking_supply_by_area
+```
+We chose to calculate the mean because we wanted every parking observation within a study area to contribute proportionally to the final summary value. Using the mean allows areas with consistently larger parking supply or higher vehicle activity to have greater influence on the result. In this case, the goal was to describe the overall parking conditions within each study area rather than identify only the middle observation. 
+
+The summarized output suggests that parking conditions vary across Seattle study areas. Some areas, such as Ballard Locks and Ballard Locks Weekday (Summer), show much larger average parking supply values compared to smaller study areas like 12th Avenue or 15th Avenue. Vehicle counts also appear to increase in areas with higher average parking supply, although the relationship is not perfectly proportional.
+
+```{r}
+parking_supply_by_area <- parking_supply_by_area |>
+  arrange(desc(mean_vehicle_count))
+
+parking_supply_by_area
+```
+We also used arrange() to sort study areas from highest to lowest mean vehicle count. This made it easier to identify which Seattle study areas appeared to experience the highest parking demand.
+
+### Results
+
+Next, we examined the direct relationship between parking spaces and total vehicle count using a scatterplot.
+
+```{r}
+#| fig.alt: "Scatterplot showing the relationship between parking spaces and total vehicle count in Seattle parking study observations. Most observations cluster at lower parking space values while locations with more parking spaces generally also show higher vehicle counts. This suggests that there is a positive relationship between parking supply and parking demand."
+
+parking_supply_clean |>
+  ggplot(aes(x = Parking_Spaces, y = Total_Vehicle_Count)) +
+  geom_point(alpha = 0.5, color = "purple") +
+  labs(
+    title = "Parking Supply vs Vehicle Demand",
+    subtitle = "Seattle Annual Parking Study Data",
+    x = "Number of Parking Spaces",
+    y = "Total Vehicle Count",
+    caption = "Data from Seattle Open Data"
+  )
+```
+
+This scatterplot shows a positive relationship between parking supply and vehicle demand in Seattle parking study areas. As the number of parking spaces increases, the total vehicle count also tends to increase. Most observations are concentrated at lower parking supply values, while only a small number of observations appear at very high parking supply levels. The graph suggests that areas with larger parking supply often experience higher parking demand, although the relationship is not perfectly linear since some locations with similar parking supply still show different vehicle counts.
+
+We also explored how parking demand differs across study areas by comparing mean vehicle counts.
+```{r}
+#| fig.alt: "Bar chart comparing mean vehicle counts across Seattle study areas. Most study areas have moderate average vehicle counts while a smaller number of areas such as Ballard Locks Weekday (Summer) and Westlake Weekday show noticeably higher parking demand than other locations."
+
+parking_supply_by_area |>
+  ggplot(aes(x = Study_Area, y = mean_vehicle_count)) +
+  geom_col(fill = "blue") +
+  labs(
+    title = "Average Vehicle Counts by Study Area",
+    subtitle = "Seattle Annual Parking Study Data",
+    x = "Study Area",
+    y = "Mean Vehicle Count",
+    caption = "Data from Seattle Open Data"
+  ) +
+theme(axis.text.x = element_text(angle = 90))
+```
+This bar chart shows that average vehicle counts vary noticeably across Seattle study areas. Most study areas have mean vehicle counts between about 4 and 10 vehicles, while a smaller number of locations show much higher average vehicle counts. Areas such as Ballard Locks Weekday (Summer) and Westlake Weekday appear to experience especially high parking demand compared to many other study areas. These differences suggest that parking accessibility and parking pressure are not evenly distributed throughout Seattle and may depend heavily on location and surrounding activity levels.
+
+
+### Annual Parking Study Results Summary
+
+Overall, the Seattle Annual Parking Study Data suggests that parking demand generally increases as parking supply increases. Study areas with larger numbers of parking spaces often also show higher vehicle counts, although the relationship is not perfectly consistent across every location. The analysis also shows that parking demand differs noticeably between Seattle study areas, with some locations experiencing much higher average vehicle counts than others. These findings suggest that parking accessibility and parking pressure vary across Seattle and may be influenced by surrounding activity levels, neighborhood characteristics, and local traffic patterns.
+
+
+
+### Analysis of Paid Parking Transactions
+
+For this analysis, we used the [Seattle Paid Parking Transaction Data from the Seattle Open Data portal](https://data.seattle.gov/Transportation/Paid-Parking-Transaction-Data/gg89-k5p6/about_data)
+
+We believe this dataset is real and appropriate to use because it was collected and published by the City of Seattle and contains records of actual paid parking transactions. The dataset includes transaction information such as payment method, parking duration, amount paid, and parking location information. Since the data comes directly from real parking transactions rather than simulations or examples, it is appropriate for studying parking payment behavior and parking accessibility in Seattle.
+
+The population we care about is people using paid parking systems in Seattle. More specifically, we are interested in understanding how parking duration and parking costs relate to the accessibility of paid parking in the city.
+
+The sample consists of completed paid parking transactions recorded by Seattle’s parking system. One important limitation is that the dataset only includes successful paid parking transactions. It does not include people who could not find parking, chose not to pay for parking, or avoided parking because of cost. Because of this, the sample may underestimate some parking accessibility problems experienced by Seattle drivers.
+
+The most important variables for this analysis are Duration.In.Minutes, Amount.Paid, and Payment.Mean. Duration.In.Minutes records the length of a parking session, Amount.Paid records how much money was paid for parking, and Payment.Mean records the payment method used during the transaction. These variables allow us to examine how parking cost changes with parking duration and how users interact with Seattle’s paid parking system.
+
+
+Here is an example of the most important features in our data:
+
+```{r}
+Paid_Parking_Transaction_Data_20260421 <- read.csv("Paid_Parking_Transaction_Data_20260421.csv")
+Paid_Parking_Transaction_Data_20260421 |> glimpse()
+```
+
+### Data Preparation
+
+Before beginning the analysis, we prepared the variables needed for examining parking duration and payment amount. The Amount.Paid variable contains dollar signs and is stored as character text rather than a numeric value, so it cannot immediately be used in calculations or graphs involving continuous numeric scales.
+
+To address this issue, we used parse_number() to extract the numeric values from the character strings. We also used the same function for Duration.In.Minutes to ensure that duration values were treated consistently as numeric measurements.
+
+```{r}
+parking_transactions_clean <- Paid_Parking_Transaction_Data_20260421 |>
+  mutate(
+    amount_paid_number = parse_number(Amount.Paid),
+    duration_number = parse_number(Duration.In.Minutes)
+  ) |>
+  filter(amount_paid_number > 0) |>
+  filter(duration_number > 0)
+
+parking_transactions_clean |>
+  glimpse()
+```
+
+This code creates a cleaner dataset that only includes observations with positive payment amounts and positive parking durations. We used filter() because observations with missing or zero values would not meaningfully contribute to understanding the relationship between parking duration and parking cost.
+
+We also summarized the parking duration and payment variables using both means and medians.
+
+```{r}
+parking_transactions_clean |>
+  summarize(
+    mean_duration = mean(duration_number),
+    median_duration = median(duration_number),
+    mean_amount_paid = mean(amount_paid_number),
+    median_amount_paid = median(amount_paid_number)
+  )
+
+parking_transactions_clean
+```
+We chose to calculate both the mean and median because these statistics distribute influence differently across the observations. The mean gives every parking transaction proportional influence over the final value, which means unusually long or expensive parking sessions can strongly affect the result. The median instead identifies the middle observation and reduces the influence of unusually large values. Using both statistics gives a more balanced understanding of what typical parking sessions look like in the dataset.
+
+```{r}
+parking_transactions_fixed <- parking_transactions_clean |>
+  mutate(
+    Parking.Space.Number =
+      replace_na(Parking.Space.Number, 0)
+  )
+
+parking_transactions_fixed |>
+  glimpse()
+```
+We used missing data handling as an intermediate tool because the dataset contained a large number of missing parking space values. Replacing missing values allowed us to continue analyzing the dataset without losing substantial amounts of information through row removal. This choice is reasonable because a missing parking space number means the transaction did not have a recorded individual space number, not that the entire transaction was invalid. Replacing it with 0 keeps the transaction in the data while making the missing space number visible.
+
+
+### Results
+
+```{r}
+#| fig.alt: "Histogram showing the distribution of total vehicle counts across Seattle parking study observations."
+
+parking_supply_clean |>
+  ggplot(aes(x = Total_Vehicle_Count)) +
+  geom_histogram(binwidth = 2, fill = "orange") +
+  labs(
+    title = "Most parking observations recorded a small number of vehicles",
+    subtitle = "Distribution of Vehicle Counts",
+    x = "Total Vehicle Count",
+    y = "Number of Observations",
+    caption = "Data from https://data.seattle.gov/Transportation/Paid-Parking-Transaction-Data/gg89-k5p6/about_data"
+  )
+```
+This histogram shows that most parking study observations recorded relatively small vehicle counts. The highest concentration of observations appears between about 1 and 10 vehicles, while observations with very large vehicle counts are much less common. The distribution is strongly right-skewed, which suggests that a small number of locations experience especially high parking demand while most Seattle parking study areas experience more moderate vehicle activity.
+
+
+```{r}
+#| fig.alt: "Bar chart showing the number of transactions by payment method in Seattle paid parking data."
+
+parking_transactions_clean |>
+  count(Payment.Mean) |>
+  ggplot(aes(x = Payment.Mean, y = n)) +
+  geom_col(fill = "blue") +
+  labs(
+    title = "The phone is the most used payment method type",
+    subtitle = "Transactions by Payment Method",
+    x = "Payment Method",
+    y = "Number of Transactions",
+    caption = "Data from https://data.seattle.gov/Transportation/Paid-Parking-Transaction-Data/gg89-k5p6/about_data"
+  )
+```
+
+
+This bar chart shows that phone payments are by far the most commonly used payment method in Seattle’s paid parking system. Credit card payments are used much less frequently, while cash transactions represent only a very small portion of total parking transactions. These results suggest that Seattle drivers rely heavily on digital and mobile payment systems when paying for parking, which may reflect changing technology use and the convenience of phone-based parking applications.
+
+
+To examine the relationship between parking duration and payment amount, we created a scatterplot comparing parking duration in minutes with the amount paid. A scatterplot is appropriate because both variables are numeric and we wanted to examine whether longer parking sessions generally correspond with higher costs.
+
+```{r}
+#| fig.alt: "Scatterplot showing the relationship between parking duration and amount paid in Seattle paid parking transactions. Most transactions are concentrated at shorter durations and lower costs, while longer parking sessions generally show higher payment amounts."
+
+parking_transactions_clean |>
+  ggplot(aes(x = duration_number, y = amount_paid_number)) +
+  geom_point(alpha = 0.5, color = "red") +
+  labs(
+    title = "Longer Parking Sessions Usually Cost More",
+    subtitle = "Seattle Paid Parking Transaction Data",
+    x = "Duration in Minutes",
+    y = "Amount Paid in Dollars",
+    caption = "Data from Seattle Open Data"
+  )
+```
+
+This scatterplot shows that longer parking sessions generally correspond with higher payment amounts. Most transactions are clustered at shorter durations and lower costs, which suggests that many paid parking sessions are relatively short. This matters for accessibility because drivers who need to stay longer may face higher costs.
+
+## General Conclusions
+
+Our analysis suggests that parking accessibility in Seattle varies noticeably across different study areas. Locations with larger parking supply often also experience higher vehicle demand, although the relationship is not perfectly consistent across all observations. Some study areas appear to experience substantially greater parking pressure than others, which may reflect differences in commercial activity, tourism, commuting patterns, or neighborhood density.
+
+The paid parking transaction data also suggests that longer parking sessions generally correspond with higher parking costs. This relationship may affect how accessible parking feels for drivers who need to park for extended periods of time. The payment method analysis additionally suggests that some payment systems may be used more frequently than others, which may reflect changing transportation technology and driver preferences.
+
+There are several limitations in this analysis. The parking study data only captures parking conditions during specific observation periods and may not fully represent all parking experiences throughout Seattle. Similarly, the transaction dataset only includes completed parking transactions and does not include drivers who avoided parking because of price or availability. Despite these limitations, the analysis still provides useful insight into how parking supply, vehicle demand, and parking costs interact throughout Seattle.Future analyses could examine how parking accessibility changes across different times of day or compare parking conditions between weekdays and weekends.
+
+
+## Project Summary
+
+Group Members: Vivienne Huang and Hansika Addanki
+
+Lab Section: Wednesday 2:30pm (TA: Melaya La Madrid)
+
+Data Sets :
+
+-  [Annual Parking Study Data 20260428](https://data.seattle.gov/Transportation/Annual-Parking-Study-Data/7jzm-ucez/about_data)
+-   [Paid Parking Transaction Data 20260421](https://data.seattle.gov/Transportation/Paid-Parking-Transaction-Data/gg89-k5p6/about_data)
+
+Basic Tools Used:
+
+- filter(), summarize(), mutate(), arrange()
+
+Intermediate/Novel Tool Used:
+
+- Missing Data Handling
+
+## Coding Notes
+
+The analysis I completed used R tools (syntax and functions from the tidyverse) we practiced in INFO 201, with the following exception:
+
+-  `theme(axis.text.x = element_text(angle = 90))`
+   - We used `theme(axis.text.x = element_text(angle = 90))` to rotate the x-axis labels in our bar graph so that long study area names would fit without overlapping each other and found the [Rotating and spacing axis labels in ggplot2 in R](https://www.geeksforgeeks.org/r-language/rotating-and-spacing-axis-labels-in-ggplot2-in-r/). This solved the problem of the graph becoming difficult to read when many study areas were displayed at once. We were unable to solve this issue using only the default graph formatting tools practiced in class because the labels remained crowded and unreadable with the original formatting.
+
+
+## Group Work Description
+
+
+Hansika and I worked together on the project using the same two Seattle parking datasets from our dashboard. We divided the labor by having one person (Vivienne) focus more on the Annual Parking Study Data and the other focus more on the Paid Parking Transaction Data (Hansika), while both of us contributed to the research question, interpretations, and final report structure. One difficulty was making sure our code matched the tools covered in class while still meeting the project requirements. Overall, the work was manageable because we communicated about what each section needed and connected both datasets back to the larger question of parking accessibility in Seattle.
+
+

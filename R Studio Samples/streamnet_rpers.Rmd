@@ -1,0 +1,422 @@
+---
+title: "StreamNet RperS"
+author: "Vivienne"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Load packages
+
+```{r loading packages}
+#Checks if each package is installed; installs it if not, then loads
+#it either way
+packages <- c("here", "dplyr", "glue", "janitor", "ggplot2", "DT", "scales", "stringr")
+for (p in packages) {
+  if (p %in% rownames(installed.packages())) {
+    library(p, character.only = TRUE)
+  } else {
+    install.packages(p)
+    library(p, character.only = TRUE)
+  }
+}
+#rCAX isn't on CRAN, so it needs a different install method
+if (!"rCAX" %in% rownames(installed.packages())) {
+  if (!"remotes" %in% rownames(installed.packages())) install.packages("remotes")
+  remotes::install_github("nwfsc-cb/rCAX")
+}
+library(rCAX)
+
+#Registers Times New Roman with the Windows graphics device so
+#ggplot2's theme() can actually resolve the font
+windowsFonts(`Times New Roman` = windowsFont("TT Times New Roman"))
+```
+
+## Define data loading and cleaning function
+
+```{r define function}
+#Pulls a StreamNet HLI table via rCAX, filtered to a single ESU/DPS.
+#Defaults are RperS (recruits per spawner) for Upper Columbia spring
+#Chinook, but hli_type/esudps_sel can target a different table/population
+hli_pull_clean <- function(hli_type = "RperS",
+                            esudps_sel = "Salmon, Chinook (Upper Columbia River spring-run ESU)"){
+  cat(glue("loading {hli_type} data for {esudps_sel}\n"))
+  
+  hli_raw <- rcax_hli(
+    hli_type,
+    flist = list(esudps = esudps_sel)
+  )
+  #rpers = recruits per spawner; totalspawners = all-origin spawner
+  #abundance; hatcheryspawners = hatchery-origin spawner abundance
+  hli_clean <- hli_raw %>%
+    clean_names() %>%
+    mutate(
+      rpers = as.numeric(rpers),
+      totalspawners = as.numeric(totalspawners),
+      recruits = as.numeric(recruits),
+      hatcheryspawners = as.numeric(hatcheryspawners)
+    )
+  
+  cat(glue("pulled {nrow(hli_clean)} rows\n"))
+  return(hli_clean)
+}
+```
+
+## Call function for each subset of interest
+
+```{r call function all subsets}
+upper_col_sp_chin_rpers <- hli_pull_clean()
+snake_sp_su_chin_rpers <- hli_pull_clean(esudps_sel = "Salmon, Chinook (Snake River spring/summer-run ESU)")
+upper_col_steelhead_rpers <- hli_pull_clean(esudps_sel = "Steelhead (Upper Columbia River DPS)")
+snake_steelhead_rpers <- hli_pull_clean(esudps_sel = "Steelhead (Snake River Basin DPS)")
+```
+
+```{r save cleaned data}
+colnames_df_rpers <- data.frame(column_name = colnames(upper_col_sp_chin_rpers))
+write.csv(colnames_df_rpers, here("Results", "CSV Files", "streamnet_rpers_colnames.csv"), row.names = FALSE)
+
+write.csv(upper_col_sp_chin_rpers, here("Results", "CSV Files", "streamnet_rpers_upper_columbia_chinook.csv"), row.names = FALSE)
+write.csv(snake_sp_su_chin_rpers, here("Results", "CSV Files", "streamnet_rpers_snake_spring_summer.csv"), row.names = FALSE)
+write.csv(upper_col_steelhead_rpers, here("Results", "CSV Files", "streamnet_rpers_upper_columbia_steelhead.csv"), row.names = FALSE)
+write.csv(snake_steelhead_rpers, here("Results", "CSV Files", "streamnet_rpers_snake_steelhead.csv"), row.names = FALSE)
+```
+
+```{r loading csvs}
+upper_col_sp_chin_rpers <- read.csv(here("Results", "CSV Files", "streamnet_rpers_upper_columbia_chinook.csv"))
+snake_sp_su_chin_rpers <- read.csv(here("Results", "CSV Files", "streamnet_rpers_snake_spring_summer.csv"))
+upper_col_steelhead_rpers <- read.csv(here("Results", "CSV Files", "streamnet_rpers_upper_columbia_steelhead.csv"))
+snake_steelhead_rpers <- read.csv(here("Results", "CSV Files", "streamnet_rpers_snake_steelhead.csv"))
+```
+
+## Explore additional data issues, produce summaries, and visualize
+
+```{r define exploration functions}
+#Missingness by column
+na_summary_function <- function(data){
+  data.frame(column_name = colnames(data), n_missing = colSums(is.na(data)))
+}
+
+#Summary stats for the rpers column
+rpers_summary_function <- function(data){
+  summary(data$rpers)
+}
+
+#Collection methods reported per population, so agency/protocol
+#coverage is visible at a glance
+rpers_methods_summary_function <- function(data){
+  data %>%
+    filter(!is.na(protmethname)) %>%
+    select(populationname, agency, protmethname) %>%
+    unique() %>%
+    arrange(populationname)
+}
+
+#Flags population/spawningyear combos with more than one NOSA row -
+#happens when two agencies both report the same population/year.
+#Diagnostic only; resolved via bestvalue filter below, not here
+check_nosa_duplicates <- function(nosa_csv_path, title_label){
+  nosa_data <- read.csv(nosa_csv_path)
+  dup_check <- nosa_data %>%
+    count(populationname, spawningyear) %>%
+    filter(n > 1)
+  cat(glue("{title_label}: {nrow(dup_check)} duplicated population/year combinations\n"))
+  print(dup_check)
+  return(dup_check)
+}
+
+#Compares RperS total spawner estimates against NOSA. Both inputs are
+#filtered to bestvalue == "Yes" first, so only one agency's row per
+#population/year is used in the join
+compare_rpers_nosa_function <- function(rpers_data, nosa_csv_path, pop_label, title_label){
+  nosa_for_comparison <- read.csv(nosa_csv_path) %>%
+    filter(bestvalue == "Yes") %>%
+    select(populationname, spawningyear, tsaij, nosaij,
+           nosa_agency = agency, nosa_protmethname = protmethname,
+           nosa_methodadjustments = methodadjustments)
+  
+  #Checks whether RperS totalspawners matches NOSA tsaij, and whether
+  #NOSA natural-origin spawners plus RperS hatchery-origin spawners
+  #sum to RperS totalspawners
+  rpers_nosa_compare <- rpers_data %>%
+    filter(bestvalue == "Yes") %>%
+    select(populationname, broodyear, totalspawners, hatcheryspawners,
+           rpers_agency = agency, rpers_protmethname = protmethname,
+           rpers_methodadjustments = methodadjustments) %>%
+    left_join(nosa_for_comparison, by = c("populationname" = "populationname", "broodyear" = "spawningyear")) %>%
+    mutate(
+      total_spawners_diff = totalspawners - tsaij,
+      total_spawners_pct_diff = round((total_spawners_diff / tsaij) * 100, 1),
+      natural_plus_hatchery = nosaij + hatcheryspawners,
+      sum_check_diff = totalspawners - natural_plus_hatchery,
+      sum_check_pct_diff = round((sum_check_diff / totalspawners) * 100, 1)
+    )
+  
+  if (nrow(rpers_nosa_compare) > nrow(rpers_data %>% filter(bestvalue == "Yes"))) {
+    cat(glue("Warning: comparison table has {nrow(rpers_nosa_compare)} rows, more than the {nrow(rpers_data %>% filter(bestvalue == 'Yes'))} bestvalue-filtered RperS rows going in\n"))
+  }
+  
+  print(datatable(rpers_nosa_compare))
+  print(summary(rpers_nosa_compare$total_spawners_diff))
+  print(summary(rpers_nosa_compare$total_spawners_pct_diff))
+  print(summary(rpers_nosa_compare$sum_check_diff))
+  print(summary(rpers_nosa_compare$sum_check_pct_diff))
+  
+  return(rpers_nosa_compare)
+}
+```
+
+```{r define presentation theme and export function}
+#Presentation theme sized for a full-bleed 16:9 slide
+presentation_theme <- theme(
+  text = element_text(family = "Times New Roman", face = "bold", size = 22),
+  plot.title = element_text(size = 28, face = "bold"),
+  axis.title = element_text(size = 22),
+  axis.text = element_text(size = 18),
+  strip.text = element_text(size = 18),
+  legend.text = element_text(size = 18),
+  legend.title = element_text(size = 20)
+)
+
+#Exports at full-bleed 16:9 widescreen dimensions
+ggsave_presentation <- function(filename, height = 7.5, width = 13.33, dpi = 300){
+  ggsave(here("Results", "Figures", filename), height = height, width = width, dpi = dpi)
+}
+
+#Wraps a title string to a fixed character width, breaking into as
+#many lines as needed
+wrap_title <- function(text, width = 28){
+  paste(strwrap(text, width = width), collapse = "\n")
+}
+
+#Splits populationname into location_name and run_species. Most names
+#use " - " as a separator; some have no dash and instead end in a
+#run/species phrase, which is matched and stripped separately
+split_pop_name <- function(df){
+  split_cols <- stringr::str_split_fixed(df$populationname, " - ", n = 2)
+  
+  location_name <- split_cols[, 1]
+  run_species <- split_cols[, 2]
+  
+  run_species_patterns <- c(
+    "spring Chinook Salmon", "summer Chinook Salmon", "fall Chinook Salmon",
+    "spring/summer Chinook Salmon", "summer Steelhead", "spring Steelhead"
+  )
+  
+  no_dash <- run_species == ""
+  
+  for (pattern in run_species_patterns) {
+    matches <- no_dash & endsWith(location_name, paste0(" ", pattern))
+    run_species[matches] <- pattern
+    location_name[matches] <- trimws(sub(paste0(" ", pattern, "$"), "", location_name[matches]))
+  }
+  
+  df %>%
+    mutate(
+      location_name = location_name,
+      run_species = run_species
+    )
+}
+```
+
+```{r explore by subset}
+upper_col_sp_chin_rpers %>% count(populationname)
+
+na_summary_function(upper_col_sp_chin_rpers)
+na_summary_function(snake_sp_su_chin_rpers)
+na_summary_function(upper_col_steelhead_rpers)
+na_summary_function(snake_steelhead_rpers)
+
+rpers_summary_function(upper_col_sp_chin_rpers)
+rpers_summary_function(snake_sp_su_chin_rpers)
+rpers_summary_function(upper_col_steelhead_rpers)
+rpers_summary_function(snake_steelhead_rpers)
+
+rpers_methods_summary_function(upper_col_sp_chin_rpers)
+rpers_methods_summary_function(snake_sp_su_chin_rpers)
+rpers_methods_summary_function(upper_col_steelhead_rpers)
+rpers_methods_summary_function(snake_steelhead_rpers)
+
+nosa_dup_upcol <- check_nosa_duplicates(here("Results", "CSV Files", "streamnet_nosa_upper_columbia.csv"), "Upper Columbia Chinook")
+nosa_dup_snake_chin <- check_nosa_duplicates(here("Results", "CSV Files", "streamnet_nosa_snake_spring_summer.csv"), "Snake River Spring/Summer Chinook")
+nosa_dup_snake_steelhead <- check_nosa_duplicates(here("Results", "CSV Files", "streamnet_nosa_snake_steelhead.csv"), "Snake River Steelhead")
+nosa_dup_upcol_steelhead <- check_nosa_duplicates(here("Results", "CSV Files", "streamnet_nosa_upper_columbia_steelhead.csv"), "Upper Columbia Steelhead")
+
+rpers_nosa_compare_upcol_chin <- compare_rpers_nosa_function(
+  upper_col_sp_chin_rpers, here("Results", "CSV Files", "streamnet_nosa_upper_columbia.csv"),
+  pop_label = "upper_columbia_chinook", title_label = "Upper Columbia Spring Chinook"
+)
+rpers_nosa_compare_snake_chin <- compare_rpers_nosa_function(
+  snake_sp_su_chin_rpers, here("Results", "CSV Files", "streamnet_nosa_snake_spring_summer.csv"),
+  pop_label = "snake_spring_summer_chinook", title_label = "Snake River Spring/Summer Chinook"
+)
+rpers_nosa_compare_snake_steelhead <- compare_rpers_nosa_function(
+  snake_steelhead_rpers, here("Results", "CSV Files", "streamnet_nosa_snake_steelhead.csv"),
+  pop_label = "snake_steelhead", title_label = "Snake River Steelhead"
+)
+rpers_nosa_compare_upcol_steelhead <- compare_rpers_nosa_function(
+  upper_col_steelhead_rpers, here("Results", "CSV Files", "streamnet_nosa_upper_columbia_steelhead.csv"),
+  pop_label = "upper_columbia_steelhead", title_label = "Upper Columbia Steelhead"
+)
+```
+
+```{r define visualization functions}
+#Faceted bar plot of total spawner abundance by population and brood
+#year. Filtered to bestvalue == "Yes" so duplicate agency rows for the
+#same population/year don't get summed together in geom_col()
+plot_totalspawners_function <- function(data, plot_title, file_name){
+  data %>%
+    filter(bestvalue == "Yes") %>%
+    split_pop_name() %>%
+    ggplot(aes(x = broodyear, y = totalspawners, fill = location_name)) +
+    geom_col() +
+    facet_wrap(~ location_name, ncol = 3) +
+    scale_y_continuous(labels = scales::comma) +
+    labs(title = plot_title, x = "Brood Year", y = "Total Spawners") +
+    theme(legend.position = "none") +
+    presentation_theme
+  ggsave_presentation(file_name)
+}
+
+#Plots RperS totalspawners against NOSA tsaij directly, so any
+#systematic mismatch is visible at a glance. compare_data is already
+#filtered to bestvalue == "Yes", so duplicate-agency points don't stack
+plot_rpers_nosa_compare_function <- function(compare_data, title_label, pop_label){
+  compare_plot <- compare_data %>%
+    split_pop_name() %>%
+    ggplot(aes(x = broodyear)) +
+    geom_line(aes(y = totalspawners, linetype = "RperS (totalspawners)"), linewidth = 1, color = "red") +
+    geom_point(aes(y = totalspawners), size = 2, color = "red") +
+    geom_line(aes(y = tsaij, linetype = "NOSA (tsaij)"), linewidth = 1, alpha = 0.5, color = "blue") +
+    geom_point(aes(y = tsaij), size = 2, alpha = 0.5, color = "blue") +
+    facet_wrap(~ location_name, scales = "free_y", ncol = 2) +
+    scale_y_continuous(labels = scales::comma) +
+    labs(title = glue("Total Spawner Abundance: RperS vs. NOSA\nby Population and Year ({title_label})"),
+         x = "Year", y = "Total Spawner Abundance", linetype = "Source") +
+    theme(legend.position = "bottom") +
+    presentation_theme +
+    theme(strip.text = element_text(size = 13))
+  print(compare_plot)
+  ggsave_presentation(glue("rpers_vs_nosa_totspawners_by_pop_year_{pop_label}.png"))
+}
+
+#Data coverage timeline: blue = rpers present, dark red = row exists
+#but rpers is NA, light red = no row at all for that population/year.
+#Filtered to bestvalue == "Yes" so a duplicate agency row doesn't
+#register as "data available" independently of the primary row
+coverage_rpers_function <- function(data, title_label, file_name){
+  pop_data <- data %>%
+    filter(bestvalue == "Yes") %>%
+    filter(!is.na(broodyear)) %>%
+    split_pop_name() %>%
+    select(location_name, broodyear, rpers)
+  
+  year_range <- seq(min(pop_data$broodyear), max(pop_data$broodyear))
+  populations <- unique(pop_data$location_name)
+  
+  full_grid <- data.frame()
+  for (pop in populations) {
+    full_grid <- bind_rows(full_grid, data.frame(location_name = pop, broodyear = year_range))
+  }
+  
+  pop_data_summary <- pop_data %>%
+    group_by(location_name, broodyear) %>%
+    summarize(has_row = TRUE, has_value = any(!is.na(rpers)), .groups = "drop")
+  
+  data_status <- full_grid %>%
+    left_join(pop_data_summary, by = c("location_name", "broodyear")) %>%
+    mutate(
+      status = case_when(
+        is.na(has_row) ~ "No data reported",
+        has_value ~ "Data available",
+        TRUE ~ "NA"
+      )
+    )
+  
+  plot_title <- wrap_title(glue("RperS Data Availability - {title_label}"))
+  
+  data_status %>%
+    ggplot(aes(x = broodyear, y = location_name, fill = status)) +
+    geom_tile(height = 0.9, width = 1) +
+    scale_fill_manual(values = c(
+      "Data available" = "blue",
+      "NA" = "darkred",
+      "No data reported" = "lightcoral"
+    )) +
+    labs(title = plot_title, x = "Year", y = NULL, fill = "Status") +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank()) +
+    presentation_theme +
+    theme(plot.title = element_text(size = 22))
+  
+  ggsave_presentation(file_name)
+}
+
+#Data coverage colored by collection method. Filtered to
+#bestvalue == "Yes" so a duplicate agency's method doesn't get
+#counted alongside the primary row's method for the same year
+coverage_by_method_function <- function(data, plot_title, file_name){
+  method_data <- data %>%
+    filter(bestvalue == "Yes") %>%
+    mutate(protmethname = as.character(protmethname)) %>%
+    split_pop_name() %>%
+    filter(!is.na(protmethname), !is.na(year)) %>%
+    select(location_name, year, protmethname) %>%
+    unique()
+  
+  method_counts <- method_data %>%
+    count(location_name, year)
+  
+  method_labeled <- method_data %>%
+    left_join(method_counts, by = c("location_name", "year")) %>%
+    mutate(
+      method_label = case_when(
+        n > 1 ~ "Multiple Methods",
+        TRUE ~ protmethname
+      )
+    ) %>%
+    select(location_name, year, method_label) %>%
+    unique()
+  
+  method_labeled %>%
+    ggplot(aes(x = year, y = location_name, fill = method_label)) +
+    geom_tile(height = 0.9, width = 1) +
+    labs(title = plot_title, x = "Year", y = NULL, fill = "Collection Method") +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank()) +
+    presentation_theme
+  
+  ggsave_presentation(file_name)
+}
+```
+
+```{r labeling graph, fig.height = 7.5, fig.width = 13.33}
+plot_totalspawners_function(upper_col_sp_chin_rpers, "Total Spawners - Upper Columbia Spring Chinook", "totalspawners_upcol_chinook.png")
+plot_totalspawners_function(snake_sp_su_chin_rpers, "Total Spawners - Snake River Spring/Summer Chinook", "totalspawners_snake_chinook.png")
+plot_totalspawners_function(upper_col_steelhead_rpers, "Total Spawners - Upper Columbia Steelhead", "totalspawners_upcol_steelhead.png")
+plot_totalspawners_function(snake_steelhead_rpers, "Total Spawners - Snake River Steelhead", "totalspawners_snake_steelhead.png")
+
+plot_rpers_nosa_compare_function(rpers_nosa_compare_upcol_chin, "Upper Columbia Spring Chinook", "upper_columbia_chinook")
+plot_rpers_nosa_compare_function(rpers_nosa_compare_snake_chin, "Snake River Spring/Summer Chinook", "snake_spring_summer_chinook")
+plot_rpers_nosa_compare_function(rpers_nosa_compare_snake_steelhead, "Snake River Steelhead", "snake_steelhead")
+plot_rpers_nosa_compare_function(rpers_nosa_compare_upcol_steelhead, "Upper Columbia Steelhead", "upper_columbia_steelhead")
+
+coverage_rpers_function(upper_col_sp_chin_rpers, "Upper Columbia Spring Chinook", "coverage_rpers_upcol_chinook.png")
+coverage_rpers_function(snake_sp_su_chin_rpers, "Snake River Spring/Summer Chinook", "coverage_rpers_snake_chinook.png")
+coverage_rpers_function(upper_col_steelhead_rpers, "Upper Columbia Steelhead", "coverage_rpers_upcol_steelhead.png")
+coverage_rpers_function(snake_steelhead_rpers, "Snake River Steelhead", "coverage_rpers_snake_steelhead.png")
+
+upper_col_sp_chin_rpers %>%
+  mutate(year = broodyear) %>%
+  coverage_by_method_function("RperS Data Coverage by Collection Method (Upper Columbia Chinook)", "rpers_coverage_by_method_upcol_chinook.png")
+
+upper_col_steelhead_rpers %>%
+  mutate(year = broodyear) %>%
+  coverage_by_method_function("RperS Data Coverage by Collection Method (Upper Columbia Steelhead)", "rpers_coverage_by_method_upcol_steelhead.png")
+
+snake_sp_su_chin_rpers %>%
+  mutate(year = broodyear) %>%
+  coverage_by_method_function("RperS Data Coverage by Collection Method (Snake River Chinook)", "rpers_coverage_by_method_snake_chinook.png")
+
+snake_steelhead_rpers %>%
+  mutate(year = broodyear) %>%
+  coverage_by_method_function("RperS Data Coverage by Collection Method (Snake River Steelhead)", "rpers_coverage_by_method_snake_steelhead.png")
+```

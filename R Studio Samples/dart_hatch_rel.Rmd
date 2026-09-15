@@ -1,0 +1,545 @@
+---
+title: "CBR DART Hatchery Releases Data Pipeline (Pilot: Spring Upper Columbia Chinook Salmon)"
+author: "Vivienne Huang"
+date: "today"
+output: html_document
+---
+
+## Load packages
+```{r loading packages}
+packages <- c("here", "dplyr", "glue", "DT", "janitor", "ggplot2")
+for (p in packages) {
+  if (p %in% rownames(installed.packages())) {
+    library(p, character.only = TRUE)
+  } else {
+    install.packages(p)
+    library(p, character.only = TRUE)
+  }
+}
+
+windowsFonts(`Times New Roman` = windowsFont("TT Times New Roman"))
+```
+
+## Define data loading and cleaning function
+```{r creating function}
+#Loops through years, pulling DART hatchery release data for each and
+#combining into one dataframe. Filters to the requested region/run_code
+hatch_rel_pull_clean <- function(years,
+                                 species_code = "ch1",
+                                 region_sel = "Upper Columbia",
+                                 run_code = "SP"){
+  dart_years_list <- list()
+  
+  for (y in years) {
+    cat(glue("loading DART hatchery release data for {y}\n"))
+    url <- glue('https://cbr.washington.edu/dart/cs/php/rpt/hatch_rel.php?',
+                'sc=1&outputFormat=csv&year={y}&ftype={species_code}')
+    year_data <- read.csv(url)
+    
+    #Some years read Mgr.Year as text; forcing to character keeps
+    #all years consistent before combining
+    year_data$Mgr.Year <- as.character(year_data$Mgr.Year)
+    
+    dart_years_list[[as.character(y)]] <- year_data
+  }
+  
+  dart_raw_data_all_years <- bind_rows(dart_years_list)
+  
+  #Citation/footer rows were mixed into the raw data; filtered out here
+  dart_clean_all_years <- dart_raw_data_all_years %>%
+    clean_names() %>%
+    mutate(mgr_year = as.numeric(mgr_year)) %>%
+    filter(!is.na(mgr_year))
+  
+  #region_sel accepts a vector, since DART splits some basins (like
+  #Snake River) across multiple region labels
+  dart_select_region_all_years <- dart_clean_all_years %>%
+    filter(region %in% region_sel, run == run_code)
+  return(dart_select_region_all_years)
+}
+```
+
+## Call function for each subset of interest
+```{r call function all subsets}
+upper_col_sp_chin <- hatch_rel_pull_clean(1979:2025)
+
+#Snake River spans three DART region labels; called twice for spring
+#and summer run codes, then combined
+snake_sp_chin <- hatch_rel_pull_clean(1979:2025, region_sel = c("Lower Snake", "Salmon", "Clearwater"), run_code = "SP")
+snake_su_chin <- hatch_rel_pull_clean(1979:2025, region_sel = c("Lower Snake", "Salmon", "Clearwater"), run_code = "SU")
+snake_sp_su_chin <- bind_rows(snake_sp_chin, snake_su_chin)
+
+#species_code = "st" per DART's hatchery release glossary
+upper_col_steelhead <- hatch_rel_pull_clean(1979:2025, species_code = "st",
+                                             region_sel = "Upper Columbia", run_code = "SU")
+
+snake_steelhead <- hatch_rel_pull_clean(1979:2025, species_code = "st",
+                                         region_sel = c("Lower Snake", "Salmon", "Clearwater"), run_code = "SU")
+
+nrow(upper_col_sp_chin)
+nrow(snake_sp_su_chin)
+nrow(upper_col_steelhead)
+nrow(snake_steelhead)
+```
+
+```{r combine subsets}
+dart_all_subsets <- bind_rows(upper_col_sp_chin, snake_sp_su_chin,
+                               upper_col_steelhead, snake_steelhead)
+
+#DART's species column uses "Chinook-1"; recoded to match "Chinook"
+dart_all_subsets <- dart_all_subsets %>%
+  mutate(
+    species_full = case_when(
+      species == "Chinook-1" ~ "Chinook",
+      TRUE ~ species
+    )
+  )
+
+dart_all_subsets %>% count(species, species_full)
+```
+
+```{r save cleaned data}
+write.csv(upper_col_sp_chin,
+          here("Results", "CSV Files", "dart_hatch_rel_upper_columbia_spring_all_years.csv"), row.names = FALSE)
+```
+
+## Explore additional data issues, produce summaries, and visualize
+```{r explore}
+na_summary_dart_all <- data.frame(
+  column_name = colnames(upper_col_sp_chin),
+  n_missing = colSums(is.na(upper_col_sp_chin))
+)
+na_summary_dart_all
+
+colnames_df_dart <- data.frame(column_name = colnames(upper_col_sp_chin))
+write.csv(colnames_df_dart, here("Results", "CSV Files", "dart_hatch_rel_colnames.csv"), row.names = FALSE)
+
+print.data.frame(upper_col_sp_chin %>% count(release_site))
+print.data.frame(upper_col_sp_chin %>% count(mgr_year))
+upper_col_sp_chin %>%
+  group_by(mgr_year, hatchery) %>%
+  summarize(n_fish = sum(number_released, na.rm = TRUE))
+```
+
+```{r load huc population table}
+#Filters out placeholder rows where population is the literal string
+#"NULL", since those aren't real populations
+huc_population_raw <- read.csv(here("Datasets", "HUC_nmfs_population_tables.csv")) %>%
+  filter(population != "NULL")
+```
+
+```{r clean huc population table}
+huc_population_all <- huc_population_raw %>%
+  select(hydrologic_huc_8, species, nwfsc_pop_id, population) %>%
+  unique()
+
+write.csv(huc_population_all, here("Results", "CSV Files", "huc_population_all.csv"), row.names = FALSE)
+```
+
+```{r scope population table to release hucs}
+#Scopes the population table down to only huc_8 codes that actually
+#appear in the release data
+release_hucs <- dart_all_subsets %>%
+  select(release_huc) %>%
+  unique() %>%
+  pull(release_huc)
+
+huc_population_uc_snake <- huc_population_all %>%
+  filter(hydrologic_huc_8 %in% release_hucs)
+```
+
+```{r build unique huc8 dataframe}
+huc8_population_count <- huc_population_uc_snake %>%
+  select(hydrologic_huc_8, population) %>%
+  unique() %>%
+  count(hydrologic_huc_8)
+
+#Collapses competing population names per huc_8 into one text field,
+#so an ambiguous huc_8's candidates are visible at a glance
+huc8_population_list <- huc_population_uc_snake %>%
+  select(hydrologic_huc_8, population) %>%
+  unique() %>%
+  group_by(hydrologic_huc_8) %>%
+  summarize(population_list = paste(population, collapse = ", "))
+
+huc8_unique <- huc8_population_list %>%
+  left_join(huc8_population_count, by = "hydrologic_huc_8") %>%
+  mutate(
+    ambiguous = case_when(
+      n > 1 ~ TRUE,
+      TRUE ~ FALSE
+    )
+  )
+
+nrow(huc8_unique)
+sum(huc8_unique$ambiguous)
+```
+
+```{r join release site to population}
+dart_uc_snake_only <- dart_all_subsets %>%
+  filter(region %in% c("Upper Columbia", "Lower Snake", "Salmon", "Clearwater"))
+
+#Joins on both huc_8 and species, so a Chinook release only matches a
+#Chinook population and a Steelhead release only matches Steelhead
+huc_ambiguous <- huc_population_uc_snake %>%
+  count(hydrologic_huc_8, species) %>%
+  filter(n > 1) %>%
+  mutate(huc_species_key = paste0(hydrologic_huc_8, "_", species)) %>%
+  pull(huc_species_key)
+
+dart_all_subsets_pop <- dart_uc_snake_only %>%
+  left_join(huc_population_uc_snake,
+            by = c("release_huc" = "hydrologic_huc_8", "species_full" = "species")) %>%
+  mutate(
+    huc_species_key = paste0(release_huc, "_", species_full),
+    population_ambiguous = case_when(
+      huc_species_key %in% huc_ambiguous ~ TRUE,
+      TRUE ~ FALSE
+    )
+  )
+
+nrow(dart_all_subsets_pop)
+nrow(dart_uc_snake_only)
+
+sum(is.na(dart_all_subsets_pop$population))
+
+sum(dart_all_subsets_pop$population_ambiguous)
+
+write.csv(dart_all_subsets_pop,
+          here("Results", "CSV Files", "dart_hatch_rel_all_subsets_with_population.csv"), row.names = FALSE)
+```
+
+```{r add basin label}
+#Basin label used to filter to one of the four core basin/species
+#subsets consistently, matching the basin/species labeling pattern
+#used in the other four pipelines
+dart_all_subsets_pop <- dart_all_subsets_pop %>%
+  mutate(
+    basin = case_when(
+      region == "Upper Columbia" ~ "Upper Columbia",
+      region %in% c("Lower Snake", "Salmon", "Clearwater") ~ "Snake River",
+      TRUE ~ NA_character_
+    )
+  )
+
+dart_all_subsets_pop %>% count(basin, species_full)
+```
+
+```{r release site population lookup with candidates}
+#Reference table of each release site, its population match, the
+#ambiguous flag, and competing population candidates for review
+release_site_population <- dart_all_subsets_pop %>%
+  select(release_site, release_huc, species_full, nwfsc_pop_id, population, population_ambiguous) %>%
+  unique() %>%
+  left_join(huc8_unique %>% select(hydrologic_huc_8, population_list),
+            by = c("release_huc" = "hydrologic_huc_8"))
+
+datatable(release_site_population)
+```
+
+```{r sum hatchery releases by population}
+#Sums release numbers within each population/HUC8, by year and
+#species. Excludes ambiguous or unmatched HUC8s
+hatchery_release_by_population_year <- dart_all_subsets_pop %>%
+  filter(!is.na(population), population_ambiguous == FALSE) %>%
+  group_by(population, species_full, mgr_year) %>%
+  summarize(total_hatchery_released = sum(number_released, na.rm = TRUE)) %>%
+  ungroup()
+
+datatable(hatchery_release_by_population_year)
+
+excluded_records <- dart_all_subsets_pop %>%
+  filter(is.na(population) | population_ambiguous == TRUE)
+
+nrow(excluded_records)
+sum(excluded_records$number_released, na.rm = TRUE)
+
+write.csv(hatchery_release_by_population_year,
+          here("Results", "CSV Files", "dart_hatch_rel_by_population_year.csv"), row.names = FALSE)
+```
+
+```{r define presentation theme and export function}
+presentation_theme <- theme(
+  text = element_text(family = "Times New Roman", face = "bold", size = 22),
+  plot.title = element_text(size = 28, face = "bold"),
+  axis.title = element_text(size = 22),
+  axis.text = element_text(size = 18),
+  strip.text = element_text(size = 18),
+  legend.text = element_text(size = 18),
+  legend.title = element_text(size = 20)
+)
+
+ggsave_presentation <- function(filename, height = 7.5, width = 13.33, dpi = 300){
+  ggsave(here("Results", "Figures", filename), height = height, width = width, dpi = dpi)
+}
+
+#Releases by individual release site, for one basin/species subset
+plot_releases_by_site_function <- function(data, basin_sel, species_sel, plot_title, file_name){
+  data %>%
+    filter(basin == basin_sel, species_full == species_sel) %>%
+    group_by(mgr_year, release_site) %>%
+    summarize(n_fish = sum(number_released, na.rm = TRUE)) %>%
+    ggplot(aes(x = mgr_year, y = n_fish, color = release_site)) +
+    geom_col() +
+    facet_wrap(~ release_site) +
+    labs(title = plot_title, x = "Year", y = "Number of Fish Released") +
+    theme(legend.position = "none") +
+    presentation_theme +
+    theme(strip.text = element_text(size = 13))
+  ggsave_presentation(file_name)
+}
+
+#Releases by hatchery, for one basin/species subset
+plot_releases_by_hatchery_function <- function(data, basin_sel, species_sel, plot_title, file_name){
+  data %>%
+    filter(basin == basin_sel, species_full == species_sel) %>%
+    group_by(mgr_year, hatchery) %>%
+    summarize(n_fish = sum(number_released, na.rm = TRUE)) %>%
+    ggplot(aes(x = mgr_year, y = n_fish, fill = hatchery)) +
+    geom_col() +
+    facet_wrap(~ hatchery) +
+    labs(title = plot_title, x = "Year", y = "Number Released") +
+    theme(legend.position = "none") +
+    presentation_theme +
+    theme(strip.text = element_text(size = 13))
+  ggsave_presentation(file_name)
+}
+
+#Releases by major release site, for one basin/species subset. "Major"
+#means total_released across all years exceeds threshold - default
+#1,000,000 carried over from the original Upper Columbia Chinook
+#version. This threshold is UNVERIFIED for the other three subsets;
+#compare against your existing exported PNGs and adjust if a subset
+#comes back with too few (or zero) major sites
+plot_releases_by_major_site_function <- function(data, basin_sel, species_sel, plot_title, file_name, threshold = 1000000){
+  subset_data <- data %>%
+    filter(basin == basin_sel, species_full == species_sel)
+  
+  site_totals <- subset_data %>%
+    group_by(release_site) %>%
+    summarize(total_released = sum(number_released, na.rm = TRUE))
+  
+  major_sites <- site_totals %>%
+    filter(total_released > threshold) %>%
+    pull(release_site)
+  
+  subset_data %>%
+    filter(release_site %in% major_sites) %>%
+    group_by(mgr_year, release_site) %>%
+    summarize(n_fish = sum(number_released, na.rm = TRUE)) %>%
+    ggplot(aes(x = mgr_year, y = n_fish, color = release_site)) +
+    geom_col() +
+    facet_wrap(~ release_site) +
+    labs(title = plot_title, x = "Year", y = "Number of Fish Released") +
+    theme(legend.position = "none") +
+    presentation_theme +
+    theme(strip.text = element_text(size = 13))
+  
+  ggsave_presentation(file_name)
+}
+
+#Same "major" logic as above, grouped by hatchery instead of release site
+plot_releases_by_major_hatchery_function <- function(data, basin_sel, species_sel, plot_title, file_name, threshold = 1000000){
+  subset_data <- data %>%
+    filter(basin == basin_sel, species_full == species_sel)
+  
+  hatch_totals <- subset_data %>%
+    group_by(hatchery) %>%
+    summarize(total_released = sum(number_released, na.rm = TRUE))
+  
+  major_hatcheries <- hatch_totals %>%
+    filter(total_released > threshold) %>%
+    pull(hatchery)
+  
+  subset_data %>%
+    filter(hatchery %in% major_hatcheries) %>%
+    group_by(mgr_year, hatchery) %>%
+    summarize(n_fish = sum(number_released, na.rm = TRUE)) %>%
+    ggplot(aes(x = mgr_year, y = n_fish, color = hatchery)) +
+    geom_col() +
+    facet_wrap(~ hatchery) +
+    labs(title = plot_title, x = "Year", y = "Number of Fish Released") +
+    theme(legend.position = "none") +
+    presentation_theme +
+    theme(strip.text = element_text(size = 13))
+  
+  ggsave_presentation(file_name)
+}
+```
+
+```{r releases by site and hatchery by subset, fig.height = 7.5, fig.width = 13.33}
+plot_releases_by_hatchery_function(dart_all_subsets_pop, "Upper Columbia", "Chinook", "Hatchery Releases by Hatchery and Year\n(Upper Columbia Chinook)", "dart_hatch_rel_by_hat_upcol_chinook.png")
+plot_releases_by_hatchery_function(dart_all_subsets_pop, "Snake River", "Chinook", "Hatchery Releases by Hatchery and Year\n(Snake River Chinook)", "dart_hatch_rel_by_hat_snake_chinook.png")
+plot_releases_by_hatchery_function(dart_all_subsets_pop, "Upper Columbia", "Steelhead", "Hatchery Releases by Hatchery and Year\n(Upper Columbia Steelhead)", "dart_hatch_rel_by_hat_upcol_steelhead.png")
+plot_releases_by_hatchery_function(dart_all_subsets_pop, "Snake River", "Steelhead", "Hatchery Releases by Hatchery and Year\n(Snake River Steelhead)", "dart_hatch_rel_by_hat_snake_steelhead.png")
+
+plot_releases_by_site_function(dart_all_subsets_pop, "Upper Columbia", "Chinook", "Hatchery Releases by Site and Year\n(Upper Columbia Chinook)", "dart_hatch_rel_by_site_upcol_chinook.png")
+plot_releases_by_site_function(dart_all_subsets_pop, "Snake River", "Chinook", "Hatchery Releases by Site and Year\n(Snake River Chinook)", "dart_hatch_rel_by_site_snake_chinook.png")
+plot_releases_by_site_function(dart_all_subsets_pop, "Upper Columbia", "Steelhead", "Hatchery Releases by Site and Year\n(Upper Columbia Steelhead)", "dart_hatch_rel_by_site_upcol_steelhead.png")
+plot_releases_by_site_function(dart_all_subsets_pop, "Snake River", "Steelhead", "Hatchery Releases by Site and Year\n(Snake River Steelhead)", "dart_hatch_rel_by_site_snake_steelhead.png")
+```
+
+```{r hatchery release data coverage timeline, fig.height = 7.5, fig.width = 13.33}
+#Data coverage: blue = number_released present, dark red = row exists
+#but number_released is NA, light red = no row at all
+hatchery_data <- dart_all_subsets_pop %>%
+  filter(!is.na(mgr_year)) %>%
+  select(hatchery, mgr_year, number_released)
+
+hatchery_year_range <- seq(min(hatchery_data$mgr_year), max(hatchery_data$mgr_year))
+hatcheries <- unique(hatchery_data$hatchery)
+
+hatchery_full_grid <- data.frame()
+for (h in hatcheries) {
+  hatchery_full_grid <- bind_rows(hatchery_full_grid, data.frame(hatchery = h, mgr_year = hatchery_year_range))
+}
+
+hatchery_data_summary <- hatchery_data %>%
+  group_by(hatchery, mgr_year) %>%
+  summarize(has_row = TRUE, has_value = any(!is.na(number_released)), .groups = "drop")
+
+hatchery_status <- hatchery_full_grid %>%
+  left_join(hatchery_data_summary, by = c("hatchery", "mgr_year")) %>%
+  mutate(
+    status = case_when(
+      is.na(has_row) ~ "No data reported",
+      has_value ~ "Data available",
+      TRUE ~ "NA"
+    )
+  )
+
+hatchery_status %>%
+  ggplot(aes(x = mgr_year, y = hatchery, fill = status)) +
+  geom_tile(height = 0.9, width = 1) +
+  scale_fill_manual(values = c(
+    "Data available" = "blue",
+    "NA" = "darkred",
+    "No data reported" = "lightcoral"
+  )) +
+  labs(title = "DART Hatchery Release Data Availability\nby Hatchery (All Subsets)", x = "Year", y = NULL, fill = "Status") +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank()) +
+  presentation_theme
+
+ggsave_presentation("dart_hatch_rel_coverage_by_hat.png")
+```
+
+```{r data coverage timeline by subbasin, fig.height = 7.5, fig.width = 13.33}
+#Same coverage logic as above, grouped by population (subbasin)
+subbasin_data <- dart_all_subsets_pop %>%
+  filter(!is.na(mgr_year), !is.na(population), population_ambiguous == FALSE) %>%
+  select(population, mgr_year, number_released)
+
+subbasin_year_range <- seq(min(subbasin_data$mgr_year), max(subbasin_data$mgr_year))
+subbasins <- unique(subbasin_data$population)
+
+subbasin_full_grid <- data.frame()
+for (s in subbasins) {
+  subbasin_full_grid <- bind_rows(subbasin_full_grid, data.frame(population = s, mgr_year = subbasin_year_range))
+}
+
+subbasin_data_summary <- subbasin_data %>%
+  group_by(population, mgr_year) %>%
+  summarize(has_row = TRUE, has_value = any(!is.na(number_released)), .groups = "drop")
+
+subbasin_status <- subbasin_full_grid %>%
+  left_join(subbasin_data_summary, by = c("population", "mgr_year")) %>%
+  mutate(
+    status = case_when(
+      is.na(has_row) ~ "No data reported",
+      has_value ~ "Data available",
+      TRUE ~ "NA"
+    )
+  )
+
+subbasin_status %>%
+  ggplot(aes(x = mgr_year, y = population, fill = status)) +
+  geom_tile(height = 0.9, width = 1) +
+  scale_fill_manual(values = c(
+    "Data available" = "blue",
+    "NA" = "darkred",
+    "No data reported" = "lightcoral"
+  )) +
+  labs(title = "DART Hatchery Release Data Availability\nby Subbasin", x = "Year", y = NULL, fill = "Status") +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank()) +
+  presentation_theme
+
+ggsave_presentation("dart_hatch_rel_coverage_by_subbasin.png")
+```
+
+```{r releases by major site and hatchery by subset, fig.height = 7.5, fig.width = 13.33}
+plot_releases_by_major_site_function(dart_all_subsets_pop, "Upper Columbia", "Chinook",
+                                      "Hatchery Releases by Major Site and Year\n(Upper Columbia Chinook)",
+                                      "dart_hatch_rel_by_major_site_upcol_chinook.png")
+
+plot_releases_by_major_site_function(dart_all_subsets_pop, "Snake River", "Chinook",
+                                      "Hatchery Releases by Major Site and Year\n(Snake River Chinook)",
+                                      "dart_hatch_rel_by_major_site_snake_chinook.png")
+
+plot_releases_by_major_site_function(dart_all_subsets_pop, "Upper Columbia", "Steelhead",
+                                      "Hatchery Releases by Major Site and Year\n(Upper Columbia Steelhead)",
+                                      "dart_hatch_rel_by_major_site_upcol_steelhead.png")
+
+plot_releases_by_major_site_function(dart_all_subsets_pop, "Snake River", "Steelhead",
+                                      "Hatchery Releases by Major Site and Year\n(Snake River Steelhead)",
+                                      "dart_hatch_rel_by_major_site_snake_steelhead.png")
+
+plot_releases_by_major_hatchery_function(dart_all_subsets_pop, "Upper Columbia", "Chinook",
+                                          "Hatchery Releases by Major Hatchery and Year\n(Upper Columbia Chinook)",
+                                          "dart_hatch_rel_by_major_hat_upcol_chinook.png")
+
+plot_releases_by_major_hatchery_function(dart_all_subsets_pop, "Snake River", "Chinook",
+                                          "Hatchery Releases by Major Hatchery and Year\n(Snake River Chinook)",
+                                          "dart_hatch_rel_by_major_hat_snake_chinook.png")
+
+plot_releases_by_major_hatchery_function(dart_all_subsets_pop, "Upper Columbia", "Steelhead",
+                                          "Hatchery Releases by Major Hatchery and Year\n(Upper Columbia Steelhead)",
+                                          "dart_hatch_rel_by_major_hat_upcol_steelhead.png")
+
+plot_releases_by_major_hatchery_function(dart_all_subsets_pop, "Snake River", "Steelhead",
+                                          "Hatchery Releases by Major Hatchery and Year\n(Snake River Steelhead)",
+                                          "dart_hatch_rel_by_major_hat_snake_steelhead.png")
+```
+
+```{r hatcheries by years of coverage, fig.height = 7.5, fig.width = 13.33}
+hatchery_years <- dart_all_subsets_pop %>%
+  count(hatchery, mgr_year) %>%
+  count(hatchery)
+
+hatcheries_enough_years <- hatchery_years %>%
+  filter(n > 2) %>%
+  pull(hatchery)
+
+dart_all_subsets_pop %>%
+  filter(hatchery %in% hatcheries_enough_years) %>%
+  group_by(mgr_year, hatchery) %>%
+  summarize(n_fish = sum(number_released, na.rm = TRUE)) %>%
+  ggplot(aes(x = mgr_year, y = n_fish, fill = hatchery)) +
+  geom_col() +
+  facet_wrap(~ hatchery) +
+  labs(title = "Hatchery Releases by Year\n(Hatcheries with More Than 2 Years of Data)",
+       x = "Year", y = "Number of Fish Released") +
+  theme(legend.position = "none") +
+  presentation_theme +
+  theme(strip.text = element_text(size = 13))
+
+ggsave_presentation("dart_hatch_rel_by_hat_enough_years.png")
+```
+
+```{r releases by subbasin, fig.height = 7.5, fig.width = 13.33}
+dart_all_subsets_pop %>%
+  filter(!is.na(population), population_ambiguous == FALSE) %>%
+  group_by(mgr_year, population) %>%
+  summarize(n_fish = sum(number_released, na.rm = TRUE)) %>%
+  ggplot(aes(x = mgr_year, y = n_fish, fill = population)) +
+  geom_col() +
+  facet_wrap(~ population) +
+  labs(title = "Hatchery Releases by Subbasin and Year",
+       x = "Year", y = "Number of Fish Released") +
+  theme(legend.position = "none") +
+  presentation_theme +
+  theme(strip.text = element_text(size = 13))
+
+ggsave_presentation("dart_hatch_rel_by_subbasin.png")
+```

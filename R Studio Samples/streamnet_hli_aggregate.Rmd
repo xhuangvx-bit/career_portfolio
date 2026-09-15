@@ -1,0 +1,661 @@
+---
+title: "StreamNet HLI Aggregated"
+author: "Vivienne"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Load packages
+```{r setup}
+packages <- c("here", "dplyr", "janitor", "ggplot2", "DT", "stringr")
+
+for (p in packages) {
+  if (p %in% rownames(installed.packages())) {
+    library(p, character.only = TRUE)
+  } else {
+    install.packages(p)
+    library(p, character.only = TRUE)
+  }
+}
+
+windowsFonts(`Times New Roman` = windowsFont("TT Times New Roman"))
+```
+
+## Define data loading and cleaning function
+```{r define age weighted brood year function}
+#Upper Columbia fish outmigrate at a mix of ages, so a flat
+#outmigrationyear - 2 offset isn't appropriate. Weights juveniles by
+#age-class proportion, calculates brood year per age class, then sums
+#across ages. Returns an empty result if required columns are missing
+#or no rows survive filtering (ex. a population with all-NA age data)
+age_weighted_broodyear_function <- function(data){
+  required_cols <- c("outmigrationyear", "totalnatural", "agency", "protmethname", "methodadjustments",
+                      "age0prop", "age1prop", "age2prop", "age3prop", "age4plusprop", "populationname")
+  
+  missing_cols <- setdiff(required_cols, colnames(data))
+  if (length(missing_cols) > 0) {
+    cat(glue::glue("age_weighted_broodyear_function: missing expected columns: {paste(missing_cols, collapse = ', ')} - returning empty result\n"))
+    return(data.frame(populationname = character(), broodyear = numeric(), totalnatural = numeric(),
+                       juvout_agency = character(), juvout_protmethname = character(), juvout_methodadjustments = character()))
+  }
+  
+  data_long <- bind_rows(
+    data %>% mutate(age = 0, age_prop = age0prop),
+    data %>% mutate(age = 1, age_prop = age1prop),
+    data %>% mutate(age = 2, age_prop = age2prop),
+    data %>% mutate(age = 3, age_prop = age3prop),
+    data %>% mutate(age = 4, age_prop = age4plusprop)
+  ) %>%
+    filter(!is.na(outmigrationyear), !is.na(age_prop)) %>%
+    mutate(
+      age_juveniles = totalnatural * age_prop,
+      broodyear = outmigrationyear - age
+    )
+  
+  if (nrow(data_long) == 0) {
+    return(data.frame(populationname = character(), broodyear = numeric(), totalnatural = numeric(),
+                       juvout_agency = character(), juvout_protmethname = character(), juvout_methodadjustments = character()))
+  }
+  
+  data_long %>%
+    group_by(populationname, broodyear) %>%
+    summarize(
+      totalnatural = sum(age_juveniles, na.rm = TRUE),
+      juvout_agency = first(agency),
+      juvout_protmethname = first(protmethname),
+      juvout_methodadjustments = first(methodadjustments)
+    ) %>%
+    ungroup()
+}
+
+#Snake River Chinook uses a confirmed migr_year - 2 offset. Steelhead
+#uses the same -2 offset, treating age 2 as yearling
+snake_broodyear_function <- function(data, species_sel){
+  data %>%
+    mutate(
+      brood_year_equiv = case_when(
+        species_sel == "Chinook" ~ outmigrationyear - 2,
+        species_sel == "Steelhead" ~ outmigrationyear - 2,
+        TRUE ~ NA_real_
+      )
+    ) %>%
+    select(populationname, outmigrationyear, brood_year_equiv, totalnatural,
+           juvout_agency = agency, juvout_protmethname = protmethname,
+           juvout_methodadjustments = methodadjustments)
+}
+```
+
+```{r define presentation theme and export function}
+presentation_theme <- theme(
+  text = element_text(family = "Times New Roman", face = "bold", size = 22),
+  plot.title = element_text(size = 28, face = "bold"),
+  axis.title = element_text(size = 22),
+  axis.text = element_text(size = 18),
+  strip.text = element_text(size = 18),
+  legend.text = element_text(size = 18),
+  legend.title = element_text(size = 20)
+)
+
+ggsave_presentation <- function(filename, height = 7.5, width = 13.33, dpi = 300){
+  ggsave(here("Results", "Figures", filename), height = height, width = width, dpi = dpi)
+}
+
+wrap_title <- function(text, width = 28){
+  paste(strwrap(text, width = width), collapse = "\n")
+}
+
+#Splits populationname into location_name and run_species. Most names
+#use " - " as a separator; some have no dash and instead end in a
+#run/species phrase, which is matched and stripped separately
+split_pop_name <- function(df){
+  split_cols <- stringr::str_split_fixed(df$populationname, " - ", n = 2)
+  
+  location_name <- split_cols[, 1]
+  run_species <- split_cols[, 2]
+  
+  run_species_patterns <- c(
+    "spring Chinook Salmon", "summer Chinook Salmon", "fall Chinook Salmon",
+    "spring/summer Chinook Salmon", "summer Steelhead", "spring Steelhead"
+  )
+  
+  no_dash <- run_species == ""
+  
+  for (pattern in run_species_patterns) {
+    matches <- no_dash & endsWith(location_name, paste0(" ", pattern))
+    run_species[matches] <- pattern
+    location_name[matches] <- trimws(sub(paste0(" ", pattern, "$"), "", location_name[matches]))
+  }
+  
+  df %>%
+    mutate(
+      location_name = location_name,
+      run_species = run_species
+    )
+}
+
+#Juvenile outmigrants per spawner, faceted by population. Populations
+#with no calculable ratio get a "No age data available" label centered
+#on an invisible 0-1 scale, so the panel renders with a visible label
+#instead of blank space
+plot_juvout_per_spawner_function <- function(data, basin_sel, species_sel, plot_title, file_name){
+  subset_data <- data %>%
+    filter(basin == basin_sel, species == species_sel) %>%
+    split_pop_name()
+  
+  no_data_pops <- subset_data %>%
+    group_by(location_name) %>%
+    summarize(has_ratio = any(!is.na(juvout_per_spawner))) %>%
+    filter(has_ratio == FALSE) %>%
+    pull(location_name)
+  
+  no_data_labels <- subset_data %>%
+    filter(location_name %in% no_data_pops) %>%
+    group_by(location_name) %>%
+    summarize(broodyear = mean(broodyear, na.rm = TRUE)) %>%
+    mutate(label_text = "No age data available")
+  
+  subset_data %>%
+    filter(!is.na(juvout_per_spawner)) %>%
+    ggplot(aes(x = broodyear, y = juvout_per_spawner, color = location_name)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    geom_blank(data = no_data_labels, aes(x = broodyear, y = 0), inherit.aes = FALSE) +
+    geom_blank(data = no_data_labels, aes(x = broodyear, y = 1), inherit.aes = FALSE) +
+    geom_text(data = no_data_labels, aes(x = broodyear, y = 0.5, label = label_text),
+              color = "red", inherit.aes = FALSE) +
+    facet_wrap(~ location_name, scales = "free_y") +
+    labs(title = plot_title,
+         x = "Brood Year", y = "JuvOut / Spawner") +
+    theme(legend.position = "none") +
+    presentation_theme +
+    theme(strip.text = element_text(size = 13))
+  
+  ggsave_presentation(file_name)
+}
+
+#Single-color version, no color-by-population legend
+plot_juvout_per_spawner_single_color_function <- function(data, basin_sel, species_sel, plot_title, file_name){
+  data %>%
+    filter(!is.na(juvout_per_spawner), basin == basin_sel, species == species_sel) %>%
+    split_pop_name() %>%
+    ggplot(aes(x = broodyear, y = juvout_per_spawner)) +
+    geom_line(linewidth = 1, color = "blue") +
+    geom_point(size = 2, color = "blue") +
+    facet_wrap(~ location_name) +
+    labs(title = plot_title,
+         x = "Brood Year", y = "JuvOut / Spawner") +
+    theme(legend.position = "none") +
+    presentation_theme +
+    theme(strip.text = element_text(size = 13))
+  
+  ggsave_presentation(file_name)
+}
+```
+
+## Call function for each subset of interest
+```{r load data for aggregation}
+#Reads cleaned data from each pipeline's saved results, rather than
+#relying on objects from other scripts
+nosa_upper_columbia <- read.csv(here("Results", "CSV Files", "streamnet_nosa_upper_columbia.csv"))
+juvout_clean <- read.csv(here("Results", "CSV Files", "streamnet_JuvOut_upper_columbia.csv"))
+upper_col_sp_chin_rpers <- read.csv(here("Results", "CSV Files", "streamnet_rpers_upper_columbia_chinook.csv"))
+upper_col_steelhead_rpers <- read.csv(here("Results", "CSV Files", "streamnet_rpers_upper_columbia_steelhead.csv"))
+huc_population_all <- read.csv(here("Results", "CSV Files", "huc_population_all.csv"))
+
+nosa_upper_columbia_steelhead <- read.csv(here("Results", "CSV Files", "streamnet_nosa_upper_columbia_steelhead.csv"))
+juvout_upper_col_steelhead <- read.csv(here("Results", "CSV Files", "streamnet_JuvOut_upper_columbia_steelhead.csv"))
+
+nosa_snake_spsu <- read.csv(here("Results", "CSV Files", "streamnet_nosa_snake_spring_summer.csv"))
+nosa_snake_steelhead <- read.csv(here("Results", "CSV Files", "streamnet_nosa_snake_steelhead.csv"))
+juvout_snake_chinook <- read.csv(here("Results", "CSV Files", "streamnet_JuvOut_snake_spring_summer.csv"))
+juvout_snake_steelhead <- read.csv(here("Results", "CSV Files", "streamnet_JuvOut_snake_steelhead.csv"))
+snake_sp_su_chin_rpers <- read.csv(here("Results", "CSV Files", "streamnet_rpers_snake_spring_summer.csv"))
+snake_steelhead_rpers <- read.csv(here("Results", "CSV Files", "streamnet_rpers_snake_steelhead.csv"))
+
+hatchery_release_by_population_year <- read.csv(here("Results", "CSV Files", "dart_hatch_rel_by_population_year.csv"))
+```
+
+```{r build population huc8 and subbasin lookups}
+huc_population_all %>%
+  count(nwfsc_pop_id) %>%
+  filter(n > 1)
+
+#Collapses all huc_8 codes for a population into one text field, so
+#joining doesn't duplicate rows for populations spanning multiple huc_8s
+population_huc8_lookup <- huc_population_all %>%
+  mutate(nwfsc_pop_id = as.character(nwfsc_pop_id)) %>%
+  select(nwfsc_pop_id, population, hydrologic_huc_8) %>%
+  unique() %>%
+  group_by(nwfsc_pop_id, population) %>%
+  summarize(huc8_list = paste(hydrologic_huc_8, collapse = ", "))
+
+columbia_huc8 <- read.csv(here("Datasets", "columbia_huc8.csv")) %>%
+  clean_names()
+
+#Same collapsing pattern as above, but for subbasin names
+population_subbasin_lookup <- huc_population_all %>%
+  mutate(nwfsc_pop_id = as.character(nwfsc_pop_id),
+         hydrologic_huc_8 = as.character(hydrologic_huc_8)) %>%
+  select(nwfsc_pop_id, hydrologic_huc_8) %>%
+  left_join(columbia_huc8 %>% mutate(huc8 = as.character(huc8)),
+            by = c("hydrologic_huc_8" = "huc8")) %>%
+  select(nwfsc_pop_id, subbasin_name) %>%
+  unique() %>%
+  group_by(nwfsc_pop_id) %>%
+  summarize(subbasin_name_list = paste(subbasin_name, collapse = ", "))
+```
+
+```{r build uncollapsed population huc8 lookup}
+#Uncollapsed version of the lookup above, one row per population/huc_8
+#pair - used for joining JuvOut onto huc_8 directly
+population_huc8_unpacked <- huc_population_all %>%
+  mutate(nwfsc_pop_id = as.character(nwfsc_pop_id)) %>%
+  select(nwfsc_pop_id, population, hydrologic_huc_8) %>%
+  unique()
+
+nrow(population_huc8_unpacked)
+
+population_huc8_unpacked %>%
+  count(nwfsc_pop_id, population) %>%
+  filter(n > 1)
+```
+
+```{r combine juvout subsets and join huc8}
+juvout_clean_labeled <- juvout_clean %>%
+  mutate(species = "Chinook", basin = "Upper Columbia")
+
+juvout_upper_col_steelhead_labeled <- juvout_upper_col_steelhead %>%
+  mutate(species = "Steelhead", basin = "Upper Columbia")
+
+juvout_snake_chinook_labeled <- juvout_snake_chinook %>%
+  mutate(species = "Chinook", basin = "Snake River")
+
+juvout_snake_steelhead_labeled <- juvout_snake_steelhead %>%
+  mutate(species = "Steelhead", basin = "Snake River")
+
+juvout_all_combined <- bind_rows(juvout_clean_labeled, juvout_upper_col_steelhead_labeled,
+                                  juvout_snake_chinook_labeled, juvout_snake_steelhead_labeled)
+
+juvout_all_combined <- juvout_all_combined %>%
+  mutate(nmfs_popid = as.character(nmfs_popid)) %>%
+  left_join(population_huc8_unpacked, by = c("nmfs_popid" = "nwfsc_pop_id"))
+
+sum(!is.na(juvout_all_combined$hydrologic_huc_8))
+nrow(juvout_all_combined)
+```
+
+```{r check age proportions sum to one}
+#Verifies age0prop through age4plusprop sum to ~1, so totalnatural is
+#fully distributed across age classes. Run for all four core subsets
+check_age_prop_sum_function <- function(data, title_label){
+  prop_check <- data %>%
+    filter(!is.na(age0prop) | !is.na(age1prop) | !is.na(age2prop) | !is.na(age3prop) | !is.na(age4plusprop)) %>%
+    mutate(
+      age_prop_total = rowSums(across(c(age0prop, age1prop, age2prop, age3prop, age4plusprop)), na.rm = TRUE)
+    )
+  
+  cat(glue::glue("{title_label}: age proportion sums (should be close to 1)\n"))
+  print(summary(prop_check$age_prop_total))
+  
+  off_rows <- prop_check %>%
+    filter(age_prop_total < 0.95 | age_prop_total > 1.05)
+  
+  cat(glue::glue("{title_label}: {nrow(off_rows)} rows with age proportions summing outside 0.95-1.05\n"))
+  
+  return(off_rows)
+}
+
+upcol_chinook_age_prop_issues <- check_age_prop_sum_function(juvout_clean, "Upper Columbia Chinook")
+upcol_steelhead_age_prop_issues <- check_age_prop_sum_function(juvout_upper_col_steelhead, "Upper Columbia Steelhead")
+snake_chinook_age_prop_issues <- check_age_prop_sum_function(juvout_snake_chinook, "Snake River Chinook")
+snake_steelhead_age_prop_issues <- check_age_prop_sum_function(juvout_snake_steelhead, "Snake River Steelhead")
+
+datatable(upcol_chinook_age_prop_issues)
+datatable(upcol_steelhead_age_prop_issues)
+datatable(snake_chinook_age_prop_issues)
+datatable(snake_steelhead_age_prop_issues)
+```
+
+```{r aggregate rpers nosa juvout upper columbia chinook}
+#Filters both NOSA and RperS to bestvalue == "Yes" before joining, so
+#duplicate-agency rows are resolved before the three-way join
+nosa_for_aggregation <- nosa_upper_columbia %>%
+  filter(bestvalue == "Yes") %>%
+  select(populationname, spawningyear, tsaij, tsaej, nosaij, nosaej,
+         nosa_agency = agency, nosa_protmethname = protmethname,
+         nosa_methodadjustments = methodadjustments)
+
+juvout_for_aggregation <- age_weighted_broodyear_function(juvout_clean)
+
+#Joins RperS (base) to NOSA by population/year, then to age-weighted
+#JuvOut by population/broodyear
+rpers_nosa_juvout_aggregate <- upper_col_sp_chin_rpers %>%
+  filter(bestvalue == "Yes") %>%
+  select(populationname, nmfs_popid, broodyear, rpers, totalspawners, hatcheryspawners,
+         rpers_agency = agency, rpers_protmethname = protmethname,
+         rpers_methodadjustments = methodadjustments) %>%
+  left_join(nosa_for_aggregation, by = c("populationname" = "populationname", "broodyear" = "spawningyear")) %>%
+  left_join(juvout_for_aggregation, by = c("populationname" = "populationname", "broodyear" = "broodyear"))
+
+sum(!is.na(rpers_nosa_juvout_aggregate$tsaij) & !is.na(rpers_nosa_juvout_aggregate$totalnatural))
+nrow(rpers_nosa_juvout_aggregate)
+
+write.csv(rpers_nosa_juvout_aggregate,
+          here("Results", "CSV Files", "rpers_nosa_juvout_aggregate_upper_columbia.csv"), row.names = FALSE)
+
+rpers_nosa_juvout_aggregate_pop <- rpers_nosa_juvout_aggregate %>%
+  mutate(nmfs_popid = as.character(nmfs_popid)) %>%
+  left_join(population_huc8_lookup, by = c("nmfs_popid" = "nwfsc_pop_id"))
+
+nrow(rpers_nosa_juvout_aggregate)
+nrow(rpers_nosa_juvout_aggregate_pop)
+```
+
+```{r aggregate rpers nosa juvout upper columbia steelhead}
+nosa_upper_columbia_steelhead_for_aggregation <- nosa_upper_columbia_steelhead %>%
+  filter(bestvalue == "Yes") %>%
+  select(populationname, spawningyear, tsaij, tsaej, nosaij, nosaej,
+         nosa_agency = agency, nosa_protmethname = protmethname,
+         nosa_methodadjustments = methodadjustments)
+
+juvout_upper_columbia_steelhead_for_aggregation <- age_weighted_broodyear_function(juvout_upper_col_steelhead)
+
+upper_columbia_steelhead_aggregate <- upper_col_steelhead_rpers %>%
+  filter(bestvalue == "Yes") %>%
+  select(populationname, nmfs_popid, broodyear, rpers, totalspawners, hatcheryspawners,
+         rpers_agency = agency, rpers_protmethname = protmethname,
+         rpers_methodadjustments = methodadjustments) %>%
+  left_join(nosa_upper_columbia_steelhead_for_aggregation, by = c("populationname" = "populationname", "broodyear" = "spawningyear")) %>%
+  left_join(juvout_upper_columbia_steelhead_for_aggregation, by = c("populationname" = "populationname", "broodyear" = "broodyear"))
+
+sum(!is.na(upper_columbia_steelhead_aggregate$tsaij) & !is.na(upper_columbia_steelhead_aggregate$totalnatural))
+nrow(upper_columbia_steelhead_aggregate)
+
+write.csv(upper_columbia_steelhead_aggregate,
+          here("Results", "CSV Files", "rpers_nosa_juvout_aggregate_upper_columbia_steelhead.csv"), row.names = FALSE)
+
+upper_columbia_steelhead_aggregate_pop <- upper_columbia_steelhead_aggregate %>%
+  mutate(nmfs_popid = as.character(nmfs_popid)) %>%
+  left_join(population_huc8_lookup, by = c("nmfs_popid" = "nwfsc_pop_id"))
+
+nrow(upper_columbia_steelhead_aggregate)
+nrow(upper_columbia_steelhead_aggregate_pop)
+```
+
+```{r aggregate rpers nosa juvout snake chinook and steelhead}
+#Snake River Chinook uses the confirmed migr_year - 2 offset
+nosa_snake_chinook_for_aggregation <- nosa_snake_spsu %>%
+  filter(bestvalue == "Yes") %>%
+  select(populationname, spawningyear, tsaij, tsaej, nosaij, nosaej,
+         nosa_agency = agency, nosa_protmethname = protmethname,
+         nosa_methodadjustments = methodadjustments)
+
+juvout_snake_chinook_for_aggregation <- snake_broodyear_function(juvout_snake_chinook, species_sel = "Chinook")
+
+snake_chinook_aggregate <- snake_sp_su_chin_rpers %>%
+  filter(bestvalue == "Yes") %>%
+  select(populationname, nmfs_popid, broodyear, rpers, totalspawners, hatcheryspawners,
+         rpers_agency = agency, rpers_protmethname = protmethname,
+         rpers_methodadjustments = methodadjustments) %>%
+  left_join(nosa_snake_chinook_for_aggregation, by = c("populationname" = "populationname", "broodyear" = "spawningyear")) %>%
+  left_join(juvout_snake_chinook_for_aggregation, by = c("populationname" = "populationname", "broodyear" = "brood_year_equiv"))
+
+sum(!is.na(snake_chinook_aggregate$tsaij) & !is.na(snake_chinook_aggregate$totalnatural))
+nrow(snake_chinook_aggregate)
+
+write.csv(snake_chinook_aggregate,
+          here("Results", "CSV Files", "rpers_nosa_juvout_aggregate_snake_chinook.csv"), row.names = FALSE)
+
+#Snake River steelhead uses the same -2 offset as Chinook
+nosa_snake_steelhead_for_aggregation <- nosa_snake_steelhead %>%
+  filter(bestvalue == "Yes") %>%
+  select(populationname, spawningyear, tsaij, tsaej, nosaij, nosaej,
+         nosa_agency = agency, nosa_protmethname = protmethname,
+         nosa_methodadjustments = methodadjustments)
+
+juvout_snake_steelhead_for_aggregation <- snake_broodyear_function(juvout_snake_steelhead, species_sel = "Steelhead")
+
+snake_steelhead_aggregate <- snake_steelhead_rpers %>%
+  filter(bestvalue == "Yes") %>%
+  select(populationname, nmfs_popid, broodyear, rpers, totalspawners, hatcheryspawners,
+         rpers_agency = agency, rpers_protmethname = protmethname,
+         rpers_methodadjustments = methodadjustments) %>%
+  left_join(nosa_snake_steelhead_for_aggregation, by = c("populationname" = "populationname", "broodyear" = "spawningyear")) %>%
+  left_join(juvout_snake_steelhead_for_aggregation, by = c("populationname" = "populationname", "broodyear" = "brood_year_equiv"))
+
+sum(!is.na(snake_steelhead_aggregate$tsaij) & !is.na(snake_steelhead_aggregate$totalnatural))
+nrow(snake_steelhead_aggregate)
+
+write.csv(snake_steelhead_aggregate,
+          here("Results", "CSV Files", "rpers_nosa_juvout_aggregate_snake_steelhead.csv"), row.names = FALSE)
+
+snake_chinook_aggregate_pop <- snake_chinook_aggregate %>%
+  mutate(nmfs_popid = as.character(nmfs_popid)) %>%
+  left_join(population_huc8_lookup, by = c("nmfs_popid" = "nwfsc_pop_id"))
+
+nrow(snake_chinook_aggregate)
+nrow(snake_chinook_aggregate_pop)
+
+snake_steelhead_aggregate_pop <- snake_steelhead_aggregate %>%
+  mutate(nmfs_popid = as.character(nmfs_popid)) %>%
+  left_join(population_huc8_lookup, by = c("nmfs_popid" = "nwfsc_pop_id"))
+
+nrow(snake_steelhead_aggregate)
+nrow(snake_steelhead_aggregate_pop)
+```
+
+## Explore additional data issues, produce summaries, and visualize
+```{r combine all subsets}
+rpers_nosa_juvout_aggregate_pop <- rpers_nosa_juvout_aggregate_pop %>%
+  mutate(species = "Chinook", basin = "Upper Columbia")
+
+upper_columbia_steelhead_aggregate_pop <- upper_columbia_steelhead_aggregate_pop %>%
+  mutate(species = "Steelhead", basin = "Upper Columbia")
+
+snake_chinook_aggregate_pop <- snake_chinook_aggregate_pop %>%
+  mutate(species = "Chinook", basin = "Snake River")
+
+snake_steelhead_aggregate_pop <- snake_steelhead_aggregate_pop %>%
+  mutate(species = "Steelhead", basin = "Snake River")
+
+all_basins_combined <- bind_rows(rpers_nosa_juvout_aggregate_pop,
+                                  upper_columbia_steelhead_aggregate_pop,
+                                  snake_chinook_aggregate_pop,
+                                  snake_steelhead_aggregate_pop)
+
+nrow(all_basins_combined)
+all_basins_combined %>% count(basin, species)
+
+write.csv(all_basins_combined,
+          here("Results", "CSV Files", "rpers_nosa_juvout_combined_all_basins.csv"), row.names = FALSE)
+```
+
+```{r join subbasin names and build datatable}
+if ("subbasin_name_list" %in% colnames(all_basins_combined)) {
+  all_basins_combined <- all_basins_combined %>%
+    select(-subbasin_name_list)
+}
+
+all_basins_combined <- all_basins_combined %>%
+  mutate(nmfs_popid = as.character(nmfs_popid)) %>%
+  left_join(population_subbasin_lookup, by = c("nmfs_popid" = "nwfsc_pop_id"))
+
+datatable(all_basins_combined, options = list(scrollX = TRUE, scrollY = "400px", paging = FALSE))
+
+write.csv(all_basins_combined,
+          here("Results", "CSV Files", "rpers_nosa_juvout_combined_all_basins.csv"), row.names = FALSE)
+```
+
+```{r calculate juvout per spawner}
+#Direct JuvOut/spawner ratio: natural-origin juveniles (totalnatural)
+#divided by total spawners (totalspawners) for the same population and
+#brood year. This is the simple version, not the SAR-based Freshwater
+#Productivity Index approach
+all_basins_combined <- all_basins_combined %>%
+  mutate(
+    juvout_per_spawner = case_when(
+      !is.na(totalnatural) & !is.na(totalspawners) & totalspawners > 0 ~ totalnatural / totalspawners,
+      TRUE ~ NA
+    )
+  )
+
+sum(!is.na(all_basins_combined$juvout_per_spawner))
+nrow(all_basins_combined)
+
+all_basins_combined %>%
+  filter(!is.na(juvout_per_spawner)) %>%
+  group_by(basin, species) %>%
+  summarize(
+    min_ratio = min(juvout_per_spawner),
+    median_ratio = median(juvout_per_spawner),
+    mean_ratio = mean(juvout_per_spawner),
+    max_ratio = max(juvout_per_spawner)
+  )
+
+write.csv(all_basins_combined,
+          here("Results", "CSV Files", "rpers_nosa_juvout_combined_all_basins.csv"), row.names = FALSE)
+```
+
+```{r join hatchery releases to combined dataset}
+#Joins summed hatchery release numbers, keyed on mgr_year against
+#all_basins_combined's broodyear
+all_basins_combined <- all_basins_combined %>%
+  left_join(hatchery_release_by_population_year,
+            by = c("population" = "population", "species" = "species_full", "broodyear" = "mgr_year"))
+
+sum(!is.na(all_basins_combined$total_hatchery_released))
+nrow(all_basins_combined)
+
+write.csv(all_basins_combined,
+          here("Results", "CSV Files", "rpers_nosa_juvout_combined_all_basins.csv"), row.names = FALSE)
+```
+
+```{r plot juvout per spawner, fig.height = 7.5, fig.width = 13.33}
+all_basins_combined %>%
+  split_pop_name() %>%
+  filter(!is.na(juvout_per_spawner)) %>%
+  ggplot(aes(x = broodyear, y = juvout_per_spawner, color = species)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ location_name, scales = "free_y") +
+  labs(title = "Juvenile Outmigrants per Spawner\nby Population and Brood Year",
+       x = "Brood Year", y = "JuvOut / Spawner", color = "Species") +
+  theme(legend.position = "bottom") +
+  presentation_theme +
+  theme(strip.text = element_text(size = 13))
+
+ggsave_presentation("juvout_per_spawner_by_pop.png")
+```
+
+```{r juvout per spawner plots by basin and species, fig.height = 7.5, fig.width = 13.33}
+plot_juvout_per_spawner_function(all_basins_combined, "Upper Columbia", "Chinook",
+                                  "Juvenile Outmigrants per Spawner by Population and Brood Year\n(Upper Columbia Chinook)",
+                                  "juvout_per_spawner_upcol_chinook.png")
+
+plot_juvout_per_spawner_function(all_basins_combined, "Upper Columbia", "Steelhead",
+                                  "Juvenile Outmigrants per Spawner by Population and Brood Year\n(Upper Columbia Steelhead)",
+                                  "juvout_per_spawner_upcol_steelhead.png")
+
+plot_juvout_per_spawner_function(all_basins_combined, "Snake River", "Chinook",
+                                  "Juvenile Outmigrants per Spawner by Population and Brood Year\n(Snake River Chinook)",
+                                  "juvout_per_spawner_snake_chinook.png")
+
+plot_juvout_per_spawner_function(all_basins_combined, "Snake River", "Steelhead",
+                                  "Juvenile Outmigrants per Spawner by Population and Brood Year\n(Snake River Steelhead)",
+                                  "juvout_per_spawner_snake_steelhead.png")
+```
+
+```{r juvout per spawner single color plots by basin and species, fig.height = 7.5, fig.width = 13.33}
+plot_juvout_per_spawner_single_color_function(all_basins_combined, "Upper Columbia", "Chinook",
+                                               "Juvenile Outmigrants per Spawner by Population and Brood Year\n(Upper Columbia Chinook)",
+                                               "juvout_per_spawner_single_color_upcol_chinook.png")
+
+plot_juvout_per_spawner_single_color_function(all_basins_combined, "Upper Columbia", "Steelhead",
+                                               "Juvenile Outmigrants per Spawner by Population and Brood Year\n(Upper Columbia Steelhead)",
+                                               "juvout_per_spawner_single_color_upcol_steelhead.png")
+
+plot_juvout_per_spawner_single_color_function(all_basins_combined, "Snake River", "Chinook",
+                                               "Juvenile Outmigrants per Spawner by Population and Brood Year\n(Snake River Chinook)",
+                                               "juvout_per_spawner_single_color_snake_chinook.png")
+
+plot_juvout_per_spawner_single_color_function(all_basins_combined, "Snake River", "Steelhead",
+                                               "Juvenile Outmigrants per Spawner by Population and Brood Year\n(Snake River Steelhead)",
+                                               "juvout_per_spawner_single_color_snake_steelhead.png")
+```
+
+```{r plot juvout by huc8, fig.height = 7.5, fig.width = 13.33}
+#Faceted by huc_8 instead of population, to assess whether aggregating
+#JuvOut up to huc_8 level looks feasible
+juvout_all_combined %>%
+  split_pop_name() %>%
+  filter(!is.na(hydrologic_huc_8), !is.na(outmigrationyear)) %>%
+  ggplot(aes(x = outmigrationyear, y = totalnatural, color = location_name)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ hydrologic_huc_8, scales = "free_y") +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "JuvOut Natural Origin Outmigrants\nby HUC8 and Year",
+       x = "Year", y = "Total Natural Outmigrants", color = "Population") +
+  theme(legend.position = "bottom") +
+  presentation_theme
+
+ggsave_presentation("juvout_by_huc8_year.png")
+```
+
+```{r density dependence check, fig.height = 7.5, fig.width = 13.33}
+#Checks for density-dependent effects: does juvout/spawner decline as
+#spawner density increases?
+all_basins_combined %>%
+  split_pop_name() %>%
+  filter(!is.na(juvout_per_spawner), !is.na(totalspawners)) %>%
+  ggplot(aes(x = totalspawners, y = juvout_per_spawner, color = species)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ location_name, scales = "free") +
+  labs(title = "Juvenile Outmigrants per Spawner vs. Spawner Abundance\n(Density-Dependence Check)",
+       x = "Total Spawners", y = "JuvOut / Spawner", color = "Species") +
+  theme(legend.position = "bottom") +
+  presentation_theme +
+  theme(strip.text = element_text(size = 13))
+
+ggsave_presentation("juvout_per_spawner_vs_spawners_density_check.png")
+```
+
+```{r hatchery release effect check, fig.height = 7.5, fig.width = 13.33}
+#First look at whether hatchery release numbers relate to
+#natural-origin juvenile production per spawner
+all_basins_combined %>%
+  split_pop_name() %>%
+  filter(!is.na(juvout_per_spawner), !is.na(total_hatchery_released)) %>%
+  ggplot(aes(x = total_hatchery_released, y = juvout_per_spawner, color = species)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ location_name, scales = "free") +
+  scale_x_continuous(labels = scales::comma) +
+  labs(title = "Juvenile Outmigrants per Spawner vs. Hatchery Releases\nby Population",
+       x = "Total Hatchery Released", y = "JuvOut / Spawner", color = "Species") +
+  theme(legend.position = "bottom") +
+  presentation_theme +
+  theme(strip.text = element_text(size = 13))
+
+ggsave_presentation("juvout_per_spawner_vs_hatchery_releases.png")
+```
+
+```{r raw juvout vs spawners scatter, fig.height = 7.5, fig.width = 13.33}
+#Shows totalnatural and totalspawners directly, so a pattern the ratio
+#could obscure (ex. a nonlinear relationship) is still visible
+all_basins_combined %>%
+  split_pop_name() %>%
+  filter(!is.na(totalnatural), !is.na(totalspawners)) %>%
+  ggplot(aes(x = totalspawners, y = totalnatural, color = species)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ location_name, scales = "free") +
+  labs(title = "Juvenile Outmigrants vs. Spawner Counts\nby Population",
+       x = "Total Spawners", y = "Total Natural Outmigrants (JuvOut)", color = "Species") +
+  theme(legend.position = "bottom") +
+  presentation_theme +
+  theme(strip.text = element_text(size = 13))
+
+ggsave_presentation("juvout_vs_spawners_raw_by_pop.png")
+```

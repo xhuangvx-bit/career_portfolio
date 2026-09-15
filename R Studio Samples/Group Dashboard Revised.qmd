@@ -1,0 +1,180 @@
+---
+title: "INFO 201: Finding Project Data"
+subtitle: "Does Seattle Have Accessible Parking?"
+author: "Vivienne Huang and Hansika Addanki"
+date: today
+format:
+  dashboard:
+    theme: cosmo
+    embed-resources: true
+---
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(DT)
+library(plotly)
+
+Paid_Parking_Transaction_Data_20260421_df <- read.csv("Paid_Parking_Transaction_Data_20260421.csv")
+Annual_Parking_Study_Data_20260428_df <- read.csv("Annual_Parking_Study_Data_20260428.csv")
+```
+
+# Data Context
+
+## Row {height=30%}
+
+### Big Picture Question
+
+Our project explores whether parking in Seattle is accessible based on the relationship between parking supply and usage. We are interested in understanding if the number of available parking spaces is sufficient to meet vehicle demand across different areas.
+
+The population of interest includes drivers and parking users in Seattle, particularly those who rely on public street parking.
+
+## Row {height=70%}
+
+### Dataset 1: Paid Parking Transactions
+
+**Source:** City of Seattle Open Data — MaryCatherine Snyder
+
+**Link:** [https://data.seattle.gov/Transportation/Paid-Parking-Transaction-Data/gg89-k5p6/about_data](https://data.seattle.gov/Transportation/Paid-Parking-Transaction-Data/gg89-k5p6/about_data)
+
+The database was developed by the City of Seattle specifically, MaryCatherine Snyder, and documents individual transactions carried out by users through the use of paid parking meters. The dataset has information on things like payment amounts, time of parking, mode of payment, and geographic locations among others. In total, the database has more than 150,000 entries recorded in 2026, which captures the behaviors exhibited by individuals who make payments for parking. This dataset shows the lengths that individuals use parking spaces and the amount of money paid.
+
+**Benefit:** It is a good dataset since it is based on actual user experience within the parking system and is helpful in determining the usage levels of services offered. 
+
+**Shortcoming:**This particular dataset has no free parking data included which means it only represents a portion of total parking demand in Seattle.
+
+### Dataset 2: Annual Parking Study Data
+
+**Source:** City of Seattle Open Data — MaryCatherine Snyder
+
+**Link:** [https://data.seattle.gov/Transportation/Annual-Parking-Study-Data/7jzm-ucez/about_data](https://data.seattle.gov/Transportation/Annual-Parking-Study-Data/7jzm-ucez/about_data)
+
+The database has been constructed by the Seattle Department of Transportation specifically, MaryCatherine Snyder, and provides recordings of the state of parking in various parts of Seattle. The recordings include the number of parking spaces, the total number of cars, and geographical information about the recording points. The recordings are made in the form of more than 167 thousand observations conducted in various districts of Seattle, recorded between 2014 and 2026. The area under study is limited to Seattle, and specifically its districts, such as South Lake Union.
+
+**Benefit:** The value of the sample for studying parking supply and demand lies in the fact that it consists of observations of the number of cars and vacant parking places at specific points.
+
+**Shortcoming:** The data was recorded across multiple years meaning that observations from different locations may not be directly comparable since parking conditions could have changed between study years
+
+# Parking Transactions
+
+## Row {height=30%}
+
+### Full Searchable Dataset
+
+```{r}
+datatable(head(Paid_Parking_Transaction_Data_20260421_df, 100))
+```
+
+### Why This Matters
+
+This visualization shows how parking duration relates to the amount paid. These variables are important because they help reveal pricing patterns and how cost increases with time. This provides insight into the affordability of paid parking in Seattle.
+
+## Row {height=70%}
+
+### Duration vs Amount Paid
+
+```{r}
+P <- Paid_Parking_Transaction_Data_20260421_df |>
+  slice_sample(n = 2000) |>
+  ggplot(aes(x = as.numeric(Duration.In.Minutes), fill = Payment.Mean)) +
+  geom_histogram(bins = 30) +
+  labs(
+    x = "Duration (Minutes)",
+    y = "Count",
+    fill = "Payment Mean"
+  )
+
+ggplotly(P)
+```
+
+### Payment Method Breakdown
+
+```{r}
+P2 <- Paid_Parking_Transaction_Data_20260421_df |>
+  count(Payment.Mean) |>
+  ggplot(aes(x = reorder(Payment.Mean, n), y = n, fill = Payment.Mean)) +
+  geom_col() +
+  labs(
+    x = "Payment Method",
+    y = "Number of Transactions",
+    fill = "Payment Method"
+  )
+
+ggplotly(P2)
+```
+
+# Parking Supply
+
+## Row {height=30%}
+
+### Why This Matters
+
+These visualizations show the relationship between the supply of parking and the demand for vehicles in Seattle. This information is important because it will enable us to determine whether the areas of Seattle with higher parking availability will receive more use.
+
+## Row {height=70%}
+
+### Full Searchable Dataset
+
+```{r}
+datatable(head(Annual_Parking_Study_Data_20260428_df, 100))
+```
+
+### Parking Supply vs Vehicle Demand
+
+```{r}
+A <- Annual_Parking_Study_Data_20260428_df |>
+  slice_sample(n = 2000) |>
+  ggplot(aes(x = Parking_Spaces, y = Total_Vehicle_Count)) +
+  geom_point(alpha = 0.5, color = "red") +
+  labs(
+    x = "Number of Parking Spaces",
+    y = "Total Vehicle Count"
+  )
+
+ggplotly(A)
+```
+
+### Distribution of Vehicle Count
+
+```{r}
+A2 <- Annual_Parking_Study_Data_20260428_df |>
+  ggplot(aes(x = Total_Vehicle_Count)) +
+  geom_histogram(fill = "purple", bins = 30) +
+  labs(
+    x = "Total Vehicle Count",
+    y = "Frequency"
+  )
+
+ggplotly(A2)
+```
+
+# Group Information
+
+## Row {height=30%}
+
+### Group Overview
+
+Our group is exploring whether parking in Seattle is accessible by looking into the relationship between parking availability and vehicle demand as well as the price of paid parking. We are in the INFO 201 lab section AH with TA Melaya La Madrid.
+
+## Row {height=40%}
+
+### Vivienne Huang
+
+Vivienne Huang (University of Washington Sophomore; xhuangvx@uw.edu) is interested in understanding how parking accessibility affects daily life in urban areas. She is interested in informatics, particularly how data can be used to solve real-world problems.
+
+### Hansika Addanki
+
+Hansika Addanki (University of Washington Freshman; addankih@uw.edu) is interested in analyzing how parking demand relates to availability across Seattle neighborhoods. She is interested in careers involving data science and using data to better understand city systems.
+
+## Row {height=30%}
+
+### Coding Notes
+
+In addition to tools covered in class, we used the function head() to limit the number of rows displayed in our datatable outputs. Due to the large amount of observations that our datasets have, creating the searchable table ended up causing severe lag hence we needed to cap the table at a certain amount of observations. We learned how to use this function by referencing online R documentation which helped us improve the performance and readability of our dashboard when working with large datasets. The resource we used is: https://www.rdocumentation.org/packages/utils/versions/3.6.2/topics/head
+
+We also used the R Markdown Cookbook to better understand how percentage-based sizing works in Quarto and R Markdown layouts, such as using {height=30%} to control how much space dashboard rows take up. We used this resource to help manually adjust dashboard layout proportions for the assignment requirements: https://yihui.org/rmarkdown-cookbook/figure-size
+
+We also used the function slice_sample() from the dplyr package (part of tidyverse) to randomly sample a smaller number of rows from our datasets before creating interactive visualizations. Due to the large amount of observations in our datasets, passing all rows to ggplotly() caused RStudio to crash, so we needed to limit the data to a sample of 2,000 rows. We learned how to use this function by referencing the dplyr documentation: https://dplyr.tidyverse.org/reference/slice.html

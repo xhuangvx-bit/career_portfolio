@@ -1,0 +1,508 @@
+---
+title: "StreamNet NOSA Data Pipeline (Multi-Population)"
+author: "Vivienne Huang"
+date: "today" 
+output: html_document
+---
+
+## Load packages
+
+```{r loading packages}
+packages <- c("here", "dplyr", "glue", "janitor", "DT", "ggplot2", "scales", "stringr")
+for (p in packages) {
+  if (p %in% rownames(installed.packages())) {
+    library(p, character.only = TRUE)
+  } else {
+    install.packages(p)
+    library(p, character.only = TRUE)
+  }
+}
+
+if (!"rCAX" %in% rownames(installed.packages())) {
+  if (!"remotes" %in% rownames(installed.packages())) install.packages("remotes")
+  remotes::install_github("nwfsc-cb/rCAX")
+}
+library(rCAX)
+
+windowsFonts(`Times New Roman` = windowsFont("TT Times New Roman"))
+```
+
+## Define data loading and cleaning function
+
+```{r define function}
+#Pulls a StreamNet HLI table via rCAX, filtered to a single ESU/DPS.
+#Defaults are NOSA (natural-origin spawner abundance) for Upper
+#Columbia spring Chinook. pop_label names the saved CSV/figure files
+hli_pull_clean <- function(hli_type = "NOSA",
+                            esudps_sel = "Salmon, Chinook (Upper Columbia River spring-run ESU)",
+                            pop_label = "upper_columbia"){
+  cat(glue("loading {hli_type} data for {esudps_sel}\n"))
+  
+  hli_raw <- rcax_hli(
+    hli_type,
+    flist = list(esudps = esudps_sel)
+  )
+  #tsaij/tsaej = total spawner abundance incl./excl. jacks; nosaij/
+  #nosaej = natural-origin spawner abundance incl./excl. jacks;
+  #phosij = percent hatchery-origin spawners incl. jacks
+  hli_clean <- hli_raw %>%
+    clean_names() %>%
+    mutate(
+      tsaij = as.numeric(tsaij),
+      tsaej = as.numeric(tsaej),
+      nosaij = as.numeric(nosaij),
+      nosaej = as.numeric(nosaej),
+      phosij = as.numeric(phosij)
+    )
+  
+  cat(glue("pulled {nrow(hli_clean)} rows\n"))
+  
+  colnames_df <- data.frame(column_name = colnames(hli_clean))
+  write.csv(colnames_df, here("Results", "CSV Files", glue("streamnet_nosa_{pop_label}_colnames.csv")), row.names = FALSE)
+  write.csv(hli_clean, here("Results", "CSV Files", glue("streamnet_nosa_{pop_label}.csv")), row.names = FALSE)
+  
+  return(hli_clean)
+}
+```
+
+## Call function for each subset of interest
+
+```{r call function all subsets}
+nosa_upper_columbia <- hli_pull_clean(
+  esudps_sel = "Salmon, Chinook (Upper Columbia River spring-run ESU)",
+  pop_label = "upper_columbia"
+)
+
+nosa_upper_columbia_steelhead <- hli_pull_clean(
+  hli_type = "NOSA",
+  esudps_sel = "Steelhead (Upper Columbia River DPS)",
+  pop_label = "upper_columbia_steelhead"
+)
+
+nosa_snake_spsu <- hli_pull_clean(
+  esudps_sel = "Salmon, Chinook (Snake River spring/summer-run ESU)",
+  pop_label = "snake_spring_summer"
+)
+
+#Not one of the four core target subsets, kept for the write-up
+nosa_snake_fall <- hli_pull_clean(
+  esudps_sel = "Salmon, Chinook (Snake River fall-run ESU)",
+  pop_label = "snake_fall"
+)
+
+nosa_snake_steelhead <- hli_pull_clean(
+  hli_type = "NOSA",
+  esudps_sel = "Steelhead (Snake River Basin DPS)",
+  pop_label = "snake_steelhead"
+)
+
+#Lower Columbia and Upper Willamette Chinook - not among the four core
+#target subsets
+nosa_lower_columbia <- hli_pull_clean(
+  esudps_sel = "Salmon, Chinook (Lower Columbia River ESU)",
+  pop_label = "lower_columbia"
+)
+
+nosa_upper_willamette <- hli_pull_clean(
+  esudps_sel = "Salmon, Chinook (Upper Willamette River ESU)",
+  pop_label = "upper_willamette"
+)
+```
+
+## Explore additional data issues, produce summaries, and visualize
+
+```{r define presentation theme and export function}
+presentation_theme <- theme(
+  text = element_text(family = "Times New Roman", face = "bold", size = 22),
+  plot.title = element_text(size = 28, face = "bold"),
+  axis.title = element_text(size = 22),
+  axis.text = element_text(size = 18),
+  strip.text = element_text(size = 18),
+  legend.text = element_text(size = 18),
+  legend.title = element_text(size = 20)
+)
+
+ggsave_presentation <- function(filename, height = 7.5, width = 13.33, dpi = 300){
+  ggsave(here("Results", "Figures", filename), height = height, width = width, dpi = dpi)
+}
+
+wrap_title <- function(text, width = 28){
+  paste(strwrap(text, width = width), collapse = "\n")
+}
+
+#Splits populationname into location_name and run_species. Most names
+#use " - " as a separator; some have no dash and instead end in a
+#run/species phrase, which is matched and stripped separately
+split_pop_name <- function(df){
+  split_cols <- stringr::str_split_fixed(df$populationname, " - ", n = 2)
+  
+  location_name <- split_cols[, 1]
+  run_species <- split_cols[, 2]
+  
+  run_species_patterns <- c(
+    "spring Chinook Salmon", "summer Chinook Salmon", "fall Chinook Salmon",
+    "spring/summer Chinook Salmon", "summer Steelhead", "spring Steelhead"
+  )
+  
+  no_dash <- run_species == ""
+  
+  for (pattern in run_species_patterns) {
+    matches <- no_dash & endsWith(location_name, paste0(" ", pattern))
+    run_species[matches] <- pattern
+    location_name[matches] <- trimws(sub(paste0(" ", pattern, "$"), "", location_name[matches]))
+  }
+  
+  df %>%
+    mutate(
+      location_name = location_name,
+      run_species = run_species
+    )
+}
+```
+
+```{r define exploration and visualization functions}
+#Missingness summary and preview of a cleaned NOSA dataframe
+show_missingness_summary <- function(df){
+  df %>% count(populationname) %>% print()
+  
+  print(datatable(df))
+  
+  na_summary <- data.frame(
+    column_name = colnames(df),
+    n_missing = colSums(is.na(df))
+  )
+  datatable(na_summary)
+}
+
+#Data coverage timeline: blue = tsaij present, dark red = row exists
+#but tsaij is NA, light red = no row at all for that population/year.
+#Filtered to bestvalue == "Yes" so duplicate agency rows don't appear
+#as separate coverage entries for the same population/year
+show_coverage_by_population <- function(df, pop_label = "upper_columbia", title_label = "Upper Columbia"){
+  pop_data <- df %>%
+    filter(bestvalue == "Yes") %>%
+    filter(!is.na(spawningyear)) %>%
+    split_pop_name() %>%
+    select(location_name, spawningyear, tsaij)
+  
+  year_range <- seq(min(pop_data$spawningyear), max(pop_data$spawningyear))
+  populations <- unique(pop_data$location_name)
+  
+  full_grid <- data.frame()
+  for (pop in populations) {
+    full_grid <- bind_rows(full_grid, data.frame(location_name = pop, spawningyear = year_range))
+  }
+  
+  pop_data_summary <- pop_data %>%
+    group_by(location_name, spawningyear) %>%
+    summarize(has_row = TRUE, has_value = any(!is.na(tsaij)), .groups = "drop")
+  
+  data_status <- full_grid %>%
+    left_join(pop_data_summary, by = c("location_name", "spawningyear")) %>%
+    mutate(
+      status = case_when(
+        is.na(has_row) ~ "No data reported",
+        has_value ~ "Data available",
+        TRUE ~ "NA"
+      )
+    )
+  
+  plot_title <- wrap_title(glue("NOSA Data Availability by Population ({title_label})"))
+  
+  data_status %>%
+    ggplot(aes(x = spawningyear, y = location_name, fill = status)) +
+    geom_tile(height = 0.9, width = 1) +
+    scale_fill_manual(values = c(
+      "Data available" = "blue",
+      "NA" = "darkred",
+      "No data reported" = "lightcoral"
+    )) +
+    labs(title = plot_title, x = "Year", y = NULL, fill = "Status") +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank()) +
+    presentation_theme +
+    theme(plot.title = element_text(size = 22))
+  
+  ggsave_presentation(glue("nosa_data_av_by_pop_{pop_label}.png"))
+}
+
+#Same coverage logic as above, shown per metric (TSAIJ, TSAEJ, NOSAIJ,
+#NOSAEJ), checked separately for each. Filtered to bestvalue == "Yes"
+#for the same reason as show_coverage_by_population
+show_coverage_all_metrics <- function(df, pop_label = "upper_columbia", title_label = "Upper Columbia"){
+  df_split <- df %>% filter(bestvalue == "Yes") %>% split_pop_name()
+  
+  df_long <- bind_rows(
+    df_split %>% mutate(metric = "TSAIJ", group_label = paste(location_name, "- TSAIJ"), metric_value = tsaij),
+    df_split %>% mutate(metric = "TSAEJ", group_label = paste(location_name, "- TSAEJ"), metric_value = tsaej),
+    df_split %>% mutate(metric = "NOSAIJ", group_label = paste(location_name, "- NOSAIJ"), metric_value = nosaij),
+    df_split %>% mutate(metric = "NOSAEJ", group_label = paste(location_name, "- NOSAEJ"), metric_value = nosaej)
+  ) %>%
+    filter(!is.na(spawningyear)) %>%
+    select(group_label, spawningyear, metric_value)
+  
+  year_range <- seq(min(df_long$spawningyear), max(df_long$spawningyear))
+  group_labels <- unique(df_long$group_label)
+  
+  full_grid <- data.frame()
+  for (g in group_labels) {
+    full_grid <- bind_rows(full_grid, data.frame(group_label = g, spawningyear = year_range))
+  }
+  
+  group_data_summary <- df_long %>%
+    group_by(group_label, spawningyear) %>%
+    summarize(has_row = TRUE, has_value = any(!is.na(metric_value)), .groups = "drop")
+  
+  data_status <- full_grid %>%
+    left_join(group_data_summary, by = c("group_label", "spawningyear")) %>%
+    mutate(
+      status = case_when(
+        is.na(has_row) ~ "No data reported",
+        has_value ~ "Data available",
+        TRUE ~ "NA"
+      )
+    )
+  
+  plot_title <- wrap_title(glue("NOSA Data Availability by Population and Metric ({title_label})"))
+  
+  data_status %>%
+    ggplot(aes(x = spawningyear, y = group_label, fill = status)) +
+    geom_tile(height = 0.9, width = 1) +
+    scale_fill_manual(values = c(
+      "Data available" = "blue",
+      "NA" = "darkred",
+      "No data reported" = "lightcoral"
+    )) +
+    labs(title = plot_title, x = "Year", y = NULL, fill = "Status") +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank()) +
+    presentation_theme +
+    theme(plot.title = element_text(size = 22))
+  
+  ggsave_presentation(glue("nosa_data_av_by_pop_metric_{pop_label}.png"))
+}
+
+#Total vs. natural-origin spawner abundance (including jacks), faceted
+#by population. Blue = total, red = natural-origin. Filtered to
+#bestvalue == "Yes" so duplicate agency rows don't create extra
+#overlapping lines/points for the same population/year
+show_total_vs_natural_plot <- function(df, pop_label = "upper_columbia", title_label = "Upper Columbia"){
+  p <- df %>%
+    filter(bestvalue == "Yes") %>%
+    split_pop_name() %>%
+    ggplot(aes(x = spawningyear)) +
+    geom_line(aes(y = tsaij, linetype = "Total (TSAIJ)"), linewidth = 1, color = "blue") +
+    geom_point(aes(y = tsaij), size = 3, color = "blue") +
+    geom_line(aes(y = nosaij, linetype = "Natural-origin (NOSAIJ)"), linewidth = 1, color = "red") +
+    geom_point(aes(y = nosaij), size = 3, color = "red") +
+    facet_wrap(~ location_name, ncol = 2) +
+    scale_y_continuous(labels = scales::comma) +
+    labs(title = glue("Total vs. Natural-Origin Spawner Abundance (Including Jacks)\nby Population and Year ({title_label})"),
+         x = "Year", y = "Spawner Abundance",
+         linetype = "Metric") +
+    theme(legend.position = "bottom") +
+    presentation_theme +
+    theme(strip.text = element_text(size = 13))
+  
+  ggsave_presentation(glue("nosa_totspabund_ij_by_pop_{pop_label}.png"))
+  print(p)
+}
+
+#Same as above, excluding jacks
+show_total_vs_natural_ej_plot <- function(df, pop_label = "upper_columbia", title_label = "Upper Columbia"){
+  p <- df %>%
+    filter(bestvalue == "Yes") %>%
+    split_pop_name() %>%
+    ggplot(aes(x = spawningyear)) +
+    geom_line(aes(y = tsaej, linetype = "Total (TSAEJ)"), linewidth = 1, color = "blue") +
+    geom_point(aes(y = tsaej), size = 3, color = "blue") +
+    geom_line(aes(y = nosaej, linetype = "Natural-origin (NOSAEJ)"), linewidth = 1, color = "red") +
+    geom_point(aes(y = nosaej), size = 3, color = "red") +
+    facet_wrap(~ location_name, ncol = 2) +
+    scale_y_continuous(labels = scales::comma) +
+    labs(title = glue("Total vs. Natural-Origin Spawner Abundance (Excluding Jacks)\nby Population and Year ({title_label})"),
+         x = "Year", y = "Spawner Abundance",
+         linetype = "Metric") +
+    theme(legend.position = "bottom") +
+    presentation_theme +
+    theme(strip.text = element_text(size = 13))
+  
+  ggsave_presentation(glue("nosa_totspabund_ej_by_pop_{pop_label}.png"))
+  print(p)
+}
+
+#Percent hatchery-origin spawners (phosij) by population and year.
+#Filtered to bestvalue == "Yes" for the same reason as the other plots
+show_hatchery_origin_pct_plot <- function(df, pop_label = "upper_columbia", title_label = "Upper Columbia"){
+  p <- df %>%
+    filter(bestvalue == "Yes", !is.na(phosij)) %>%
+    split_pop_name() %>%
+    ggplot(aes(x = spawningyear, y = phosij)) +
+    geom_line(linewidth = 1, color = "blue") +
+    geom_point(size = 3, color = "blue") +
+    facet_wrap(~ location_name, ncol = 2) +
+    scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+    labs(title = glue("Percent Hatchery-Origin Spawners\nby Population and Year ({title_label})"),
+         x = "Year", y = "Percent Hatchery-Origin") +
+    theme(legend.position = "none") +
+    presentation_theme +
+    theme(strip.text = element_text(size = 13))
+  
+  ggsave_presentation(glue("nosa_hatchery_origin_pct_by_pop_{pop_label}.png"))
+  print(p)
+}
+
+#Single-panel version, colored by population instead of faceted
+show_hatchery_origin_pct_single_panel_plot <- function(df, pop_label = "upper_columbia", title_label = "Upper Columbia"){
+  df %>%
+    filter(bestvalue == "Yes", !is.na(phosij)) %>%
+    split_pop_name() %>%
+    ggplot(aes(x = spawningyear, y = phosij, color = location_name)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+    labs(title = glue("Percent Hatchery-Origin Spawners by Population\n({title_label})"),
+         x = "Year", y = "Percent Hatchery-Origin", color = "Population") +
+    theme(legend.position = "bottom") +
+    presentation_theme
+  
+  ggsave_presentation(glue("nosa_hatchery_origin_pct_single_panel_{pop_label}.png"))
+}
+
+#Single-panel total spawner abundance, colored by population
+show_total_spawners_single_panel_plot <- function(df, pop_label = "upper_columbia", title_label = "Upper Columbia"){
+  df %>%
+    filter(bestvalue == "Yes", !is.na(tsaij)) %>%
+    split_pop_name() %>%
+    ggplot(aes(x = spawningyear, y = tsaij, color = location_name)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    scale_y_continuous(labels = scales::comma) +
+    labs(title = glue("Total Spawner Abundance by Population\n({title_label})"),
+         x = "Year", y = "Total Spawner Abundance", color = "Population") +
+    theme(legend.position = "bottom") +
+    presentation_theme
+  
+  ggsave_presentation(glue("nosa_total_spawners_single_panel_{pop_label}.png"))
+}
+
+#Single-panel natural-origin spawner abundance, colored by population
+show_nosaij_single_panel_plot <- function(df, pop_label = "upper_columbia", title_label = "Upper Columbia"){
+  df %>%
+    filter(bestvalue == "Yes", !is.na(nosaij)) %>%
+    split_pop_name() %>%
+    ggplot(aes(x = spawningyear, y = nosaij, color = location_name)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    scale_y_continuous(labels = scales::comma) +
+    labs(title = glue("Natural-Origin Spawner Abundance by Population\n({title_label})"),
+         x = "Year", y = "Natural-Origin Spawners (NOSAIJ)", color = "Population") +
+    theme(legend.position = "bottom") +
+    presentation_theme
+  
+  ggsave_presentation(glue("nosa_nosaij_single_panel_{pop_label}.png"))
+}
+```
+
+```{r explore and visualize by subset, fig.height = 7.5, fig.width = 13.33}
+show_missingness_summary(nosa_upper_columbia)
+show_coverage_by_population(nosa_upper_columbia, pop_label = "upper_columbia", title_label = "Upper Columbia")
+show_coverage_all_metrics(nosa_upper_columbia, pop_label = "upper_columbia", title_label = "Upper Columbia")
+show_total_vs_natural_plot(nosa_upper_columbia, pop_label = "upper_columbia", title_label = "Upper Columbia")
+show_total_vs_natural_ej_plot(nosa_upper_columbia, pop_label = "upper_columbia", title_label = "Upper Columbia")
+show_hatchery_origin_pct_single_panel_plot(nosa_upper_columbia, pop_label = "upper_columbia", title_label = "Upper Columbia Chinook")
+show_total_spawners_single_panel_plot(nosa_upper_columbia, pop_label = "upper_columbia", title_label = "Upper Columbia Chinook")
+show_nosaij_single_panel_plot(nosa_upper_columbia, pop_label = "upper_columbia", title_label = "Upper Columbia Chinook")
+
+show_missingness_summary(nosa_upper_columbia_steelhead)
+show_coverage_by_population(nosa_upper_columbia_steelhead, pop_label = "upper_columbia_steelhead", title_label = "Upper Columbia Steelhead")
+show_coverage_all_metrics(nosa_upper_columbia_steelhead, pop_label = "upper_columbia_steelhead", title_label = "Upper Columbia Steelhead")
+show_total_vs_natural_plot(nosa_upper_columbia_steelhead, pop_label = "upper_columbia_steelhead", title_label = "Upper Columbia Steelhead")
+show_total_vs_natural_ej_plot(nosa_upper_columbia_steelhead, pop_label = "upper_columbia_steelhead", title_label = "Upper Columbia Steelhead")
+show_hatchery_origin_pct_single_panel_plot(nosa_upper_columbia_steelhead, pop_label = "upper_columbia_steelhead", title_label = "Upper Columbia Steelhead")
+show_total_spawners_single_panel_plot(nosa_upper_columbia_steelhead, pop_label = "upper_columbia_steelhead", title_label = "Upper Columbia Steelhead")
+show_nosaij_single_panel_plot(nosa_upper_columbia_steelhead, pop_label = "upper_columbia_steelhead", title_label = "Upper Columbia Steelhead")
+
+show_missingness_summary(nosa_snake_spsu)
+show_coverage_by_population(nosa_snake_spsu, pop_label = "snake_spring_summer", title_label = "Snake River Spring/Summer-Run")
+show_coverage_all_metrics(nosa_snake_spsu, pop_label = "snake_spring_summer", title_label = "Snake River Spring/Summer-Run")
+show_total_vs_natural_plot(nosa_snake_spsu, pop_label = "snake_spring_summer", title_label = "Snake River Spring/Summer-Run")
+show_total_vs_natural_ej_plot(nosa_snake_spsu, pop_label = "snake_spring_summer", title_label = "Snake River Spring/Summer-Run")
+show_hatchery_origin_pct_single_panel_plot(nosa_snake_spsu, pop_label = "snake_spring_summer", title_label = "Snake River Chinook")
+show_total_spawners_single_panel_plot(nosa_snake_spsu, pop_label = "snake_spring_summer", title_label = "Snake River Chinook")
+show_nosaij_single_panel_plot(nosa_snake_spsu, pop_label = "snake_spring_summer", title_label = "Snake River Chinook")
+
+show_missingness_summary(nosa_snake_fall)
+show_coverage_by_population(nosa_snake_fall, pop_label = "snake_fall", title_label = "Snake River Fall-Run")
+show_coverage_all_metrics(nosa_snake_fall, pop_label = "snake_fall", title_label = "Snake River Fall-Run")
+show_total_vs_natural_plot(nosa_snake_fall, pop_label = "snake_fall", title_label = "Snake River Fall-Run")
+show_total_vs_natural_ej_plot(nosa_snake_fall, pop_label = "snake_fall", title_label = "Snake River Fall-Run")
+
+show_missingness_summary(nosa_snake_steelhead)
+show_coverage_by_population(nosa_snake_steelhead, pop_label = "snake_steelhead", title_label = "Snake River Steelhead")
+show_coverage_all_metrics(nosa_snake_steelhead, pop_label = "snake_steelhead", title_label = "Snake River Steelhead")
+show_total_vs_natural_plot(nosa_snake_steelhead, pop_label = "snake_steelhead", title_label = "Snake River Steelhead")
+show_total_vs_natural_ej_plot(nosa_snake_steelhead, pop_label = "snake_steelhead", title_label = "Snake River Steelhead")
+show_hatchery_origin_pct_single_panel_plot(nosa_snake_steelhead, pop_label = "snake_steelhead", title_label = "Snake River Steelhead")
+show_total_spawners_single_panel_plot(nosa_snake_steelhead, pop_label = "snake_steelhead", title_label = "Snake River Steelhead")
+show_nosaij_single_panel_plot(nosa_snake_steelhead, pop_label = "snake_steelhead", title_label = "Snake River Steelhead")
+
+show_missingness_summary(nosa_lower_columbia)
+show_coverage_by_population(nosa_lower_columbia, pop_label = "lower_columbia", title_label = "Lower Columbia")
+show_coverage_all_metrics(nosa_lower_columbia, pop_label = "lower_columbia", title_label = "Lower Columbia")
+show_total_vs_natural_plot(nosa_lower_columbia, pop_label = "lower_columbia", title_label = "Lower Columbia")
+show_total_vs_natural_ej_plot(nosa_lower_columbia, pop_label = "lower_columbia", title_label = "Lower Columbia")
+
+show_missingness_summary(nosa_upper_willamette)
+show_coverage_by_population(nosa_upper_willamette, pop_label = "upper_willamette", title_label = "Upper Willamette")
+show_coverage_all_metrics(nosa_upper_willamette, pop_label = "upper_willamette", title_label = "Upper Willamette")
+show_total_vs_natural_plot(nosa_upper_willamette, pop_label = "upper_willamette", title_label = "Upper Willamette")
+show_total_vs_natural_ej_plot(nosa_upper_willamette, pop_label = "upper_willamette", title_label = "Upper Willamette")
+```
+
+```{r Snake River NOSA by population, fig.height = 7.5, fig.width = 13.33}
+#Combines spring/summer-run and fall-run into one dataset, with a
+#run_type column so facets stay distinct. Filtered to bestvalue == "Yes"
+#so duplicate agency rows aren't double-summed in the group_by/summarize
+snake_nosa_combined <- bind_rows(
+  nosa_snake_spsu %>% filter(bestvalue == "Yes") %>% split_pop_name() %>% select(location_name, spawningyear, tsaij) %>% mutate(run_type = "Spring/Summer-Run"),
+  nosa_snake_fall %>% filter(bestvalue == "Yes") %>% split_pop_name() %>% select(location_name, spawningyear, tsaij) %>% mutate(run_type = "Fall-Run")
+) %>%
+  mutate(facet_label = paste(location_name, "-", run_type))
+
+snake_nosa_combined %>%
+  group_by(spawningyear, facet_label) %>%
+  summarize(total_spawners = sum(tsaij, na.rm = TRUE)) %>%
+  ggplot(aes(x = spawningyear, y = total_spawners, color = facet_label)) +
+  geom_col() +
+  facet_wrap(~ facet_label, scales = "free_y", ncol = 2) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Total Spawner Abundance (Including Jacks)\nby Population and Year (Snake River, All Runs)",
+       x = "Year", y = "Total Spawner Abundance") +
+  theme(legend.position = "none") +
+  presentation_theme +
+  theme(strip.text = element_text(size = 13))
+
+ggsave_presentation("nosa_snake_by_pop_year_all_runs.png")
+```
+
+```{r Upper Columbia NOSA by population, fig.height = 7.5, fig.width = 13.33}
+#Filtered to bestvalue == "Yes" so duplicate agency rows aren't
+#double-summed in the group_by/summarize
+nosa_upper_columbia %>%
+  filter(bestvalue == "Yes") %>%
+  split_pop_name() %>%
+  group_by(spawningyear, location_name) %>%
+  summarize(total_spawners = sum(tsaij, na.rm = TRUE)) %>%
+  ggplot(aes(x = spawningyear, y = total_spawners, color = location_name)) +
+  geom_col() +
+  facet_wrap(~ location_name, scales = "free_y", ncol = 2) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Total Spawner Abundance (Including Jacks)\nby Population and Year (Upper Columbia)",
+       x = "Year", y = "Total Spawner Abundance") +
+  theme(legend.position = "none") +
+  presentation_theme +
+  theme(strip.text = element_text(size = 13))
+
+ggsave_presentation("nosa_upper_columbia_by_pop_year.png")
+```
